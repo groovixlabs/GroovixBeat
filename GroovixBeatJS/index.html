@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Favicons -->
+    <link href="images/GroovixLabsLogoSmall.png" rel="icon">
+    <link href="images/GroovixLabsLogoSmall.png" rel="apple-touch-icon">
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GrooviXBeat - Music Sequencer</title>
+    <link href="css/index.css" rel="stylesheet">
+    <link href="css/importdialog.css" rel="stylesheet">
+</head>
+<body>
+    <div class="sequencer-container">
+        <!-- Song Controls Bar -->
+        <div class="song-controls">
+
+            <img src="images/GroovixLabsLogo.png" height="32">
+
+            <button class="main-tab active" id="songTab" data-tab="song">Song</button>
+            <button class="main-tab" id="editorTab" data-tab="editor">Clips</button>
+            <button class="main-tab" id="mixerTab" data-tab="mixer">Mixer</button>
+
+            <div class="product-name-container">
+                <!--
+                <button class="settings-toggle-btn" id="songMixerBtn" title="Show/Hide Mixer">
+                    <span class="icon  icon-mixer"></span>
+                </button>
+
+                <button class="settings-toggle-btn" id="settingsToggleBtn" title="Settings Mode - Click scenes/clips to edit properties">
+                    <span class="icon  icon-settings"></span>
+                </button>
+                -->
+            </div>
+        </div>
+
+        <!-- Main Tab Bar 
+        <div class="main-tab-bar">
+            <button class="main-tab active" id="songTab" data-tab="song">Song</button>
+            <button class="main-tab" id="editorTab" data-tab="editor">Clips</button>
+            <button class="main-tab" id="mixerTab" data-tab="mixer">Mixer</button>
+        </div>
+        -->
+        
+        <div class="step-info" ><span id="editorInfo">Scene 1 - Track 1</span> | <span id="stepInfo"> Pencil: Click to add | Drag to move | Drag edge to resize | Right-click to delete</span></div>
+
+        <!-- Song Tab Content -->
+        <div class="main-tab-content song-tab-panel active" id="songTabContent" data-tab-content="song">
+
+            <div class="song-toolbar-controls">
+                <div class="transport-controls">
+                    <button class="transport-btn" id="playBtn" title="Play">
+                        <span class="icon  icon-play"></span>
+                    </button>
+                    <button class="transport-btn" id="stopBtn" title="Stop">
+                        <span class="icon  icon-stop"></span>
+                    </button>
+                </div>
+
+                <div class="settings-toggle">
+                    <button class="settings-toggle-btn" id="livePerformanceBtn" title="Live Performance Mode - Click clips to launch/stop playback">
+                        <span class="icon  icon-live"></span>
+                    </button>
+                </div>
+
+
+                <div class="settings-toggle">
+                    <button class="settings-toggle-btn" id="settingsToggleBtn" title="Settings Mode - Click scenes/clips to edit properties">
+                        <span class="icon  icon-settings"></span>
+                    </button>
+                </div>
+
+
+                <div class="tempo-control">
+                    <span class="tempo-label">BPM</span>
+                    <input type="number" id="tempoInput" class="tempo-input" value="120" min="20" max="300">
+                </div>
+                <div class="quantize-control">
+                    <span class="quantize-label">Quantize</span>
+                    <select id="songQuantizeSelect" class="quantize-select" title="Song-level quantization (can be overridden by scene/clip)">
+                        <option value="1">1/16</option>
+                        <option value="4" selected>1/4</option>
+                        <option value="8">1/2</option>
+                        <option value="16">1 Bar</option>
+                    </select>
+                </div>                
+
+                <button class="transport-btn danger" id="clearBtn" title="Clear All">
+                    <span class="icon  icon-trash"></span>
+                </button>
+
+            </div>
+
+            <div class="songs-internal-tab-panel">
+                <div class="grid-header" id="gridHeader"></div>
+                <div id="grid"></div>
+            </div>
+        </div>
+
+        <!-- Editor Tab Content -->
+        <div class="main-tab-content" id="editorTabContent" data-tab-content="editor">
+            <!-- Clip editor content will be moved here by JavaScript when active -->
+        </div>
+
+        <!-- Mixer Tab Content -->
+        <div class="main-tab-content" id="mixerTabContent" data-tab-content="mixer">
+            <div class="mixer-tab-panel">
+                
+                <div class="song-mixer-channels" id="songMixerChannels">
+                    <!-- Channels will be generated dynamically -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    
+
+    <!-- Clip Properties Popup -->
+    <div class="clip-props-overlay" id="clipPropsOverlay">
+        <div class="clip-props-popup">
+            <div class="clip-props-header">
+                <div>
+                    <div class="clip-props-title">Clip Properties</div>
+                    <div class="clip-props-subtitle" id="clipPropsSubtitle">Scene 1 - Track 1</div>
+                </div>
+                <button class="clip-props-close" id="clipPropsClose">&times;</button>
+            </div>
+            <div class="clip-props-form">
+                <div class="clip-props-field">
+                    <label class="clip-props-label">Length (Bars)</label>
+                    <select class="clip-props-select" id="clipPropsLength">
+                        <option value="16">1 bar (16 steps)</option>
+                        <option value="32">2 bars (32 steps)</option>
+                        <option value="48">3 bars (48 steps)</option>
+                        <option value="64">4 bars (64 steps)</option>
+                        <option value="80">5 bars (80 steps)</option>
+                        <option value="96">6 bars (96 steps)</option>
+                        <option value="112">7 bars (112 steps)</option>
+                        <option value="128">8 bars (128 steps)</option>
+                        <option value="144">9 bars (144 steps)</option>
+                        <option value="160">10 bars (160 steps)</option>
+                        <option value="176">11 bars (176 steps)</option>
+                        <option value="192">12 bars (192 steps)</option>
+                        <option value="208">13 bars (208 steps)</option>
+                        <option value="224">14 bars (224 steps)</option>
+                        <option value="240">15 bars (240 steps)</option>
+                        <option value="256">16 bars (256 steps)</option>
+                    </select>
+                </div>
+                <div class="clip-props-field">
+                    <label class="clip-props-label">Play Mode</label>
+                    <select class="clip-props-select" id="clipPropsPlayMode">
+                        <option value="loop">Loop</option>
+                        <option value="oneshot">One Shot</option>
+                    </select>
+                </div>
+                <div class="clip-props-field">
+                    <label class="clip-props-label">Quantization</label>
+                    <select class="clip-props-select" id="clipPropsQuantize">
+                        <option value="0">Inherit (from Scene)</option>
+                        <option value="1">1 Step (1/16)</option>
+                        <option value="4">4 Steps (1/4)</option>
+                        <option value="8">8 Steps (1/2)</option>
+                        <option value="16">16 Steps (1 Bar)</option>
+                    </select>
+                </div>
+                <div class="clip-props-field">
+                    <label class="clip-props-label">Options</label>
+                    <div class="clip-props-checkbox-group">
+                        <label class="clip-props-checkbox-label">
+                            <input type="checkbox" class="clip-props-checkbox" id="clipPropsMute">
+                            Mute
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="clip-props-actions">
+                <button class="clip-props-btn-action" id="clipPropsCancel">Cancel</button>
+                <button class="clip-props-btn-action primary" id="clipPropsSave">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scene Properties Popup -->
+    <div class="scene-props-overlay" id="scenePropsOverlay">
+        <div class="scene-props-popup">
+            <div class="scene-props-header">
+                <span class="scene-props-title">Scene Properties</span>
+                <button class="scene-props-close" id="scenePropsClose">&times;</button>
+            </div>
+            <div class="scene-props-form">
+                <div class="scene-props-field">
+                    <label class="scene-props-label">Name</label>
+                    <input type="text" class="scene-props-input" id="scenePropsName" placeholder="Scene name">
+                </div>
+                <div class="scene-props-row">
+                    <div class="scene-props-field">
+                        <label class="scene-props-label">Time.Sig</label>
+                        <select class="scene-props-select" id="scenePropsSignature">
+                            <option value="2/4">2/4</option>
+                            <option value="3/4">3/4</option>
+                            <option value="4/4" selected>4/4</option>
+                            <option value="5/4">5/4</option>
+                            <option value="6/4">6/4</option>
+                            <option value="7/4">7/4</option>
+                            <option value="6/8">6/8</option>
+                            <option value="9/8">9/8</option>
+                            <option value="12/8">12/8</option>
+                        </select>
+                    </div>
+                    <div class="scene-props-field">
+                        <label class="scene-props-label">Repeat</label>
+                        <input type="number" class="scene-props-input" id="scenePropsRepeat" min="1" max="99" value="1">
+                    </div>
+                    <div class="scene-props-field">
+                        <label class="scene-props-label">Quantization</label>
+                        <select class="scene-props-select" id="scenePropsQuantize">
+                            <option value="0">Inherit (from Song)</option>
+                            <option value="1">1 Step (1/16)</option>
+                            <option value="4">4 Steps (1/4)</option>
+                            <option value="8">8 Steps (1/2)</option>
+                            <option value="16">16 Steps (1 Bar)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="scene-props-field">
+                    <label class="scene-props-label">Transitions</label>
+                    <div class="scene-props-checkbox-group">
+                        <label class="scene-props-checkbox-label">
+                            <input type="checkbox" class="scene-props-checkbox" id="scenePropsFadeIn">
+                            Fade In
+                        </label>
+                        <label class="scene-props-checkbox-label">
+                            <input type="checkbox" class="scene-props-checkbox" id="scenePropsFadeOut">
+                            Fade Out
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="scene-props-manage">
+                <button class="scene-props-btn-manage" id="scenePropsClone" title="Clone Scene">Clone</button>
+                <button class="scene-props-btn-manage danger" id="scenePropsDelete" title="Delete Scene">Delete</button>
+                <button class="scene-props-btn-manage" id="scenePropsMoveUp" title="Move Up">Move Up</button>
+                <button class="scene-props-btn-manage" id="scenePropsMoveDown" title="Move Down">Move Down</button>
+            </div>
+            <div class="scene-props-actions">
+                <button class="scene-props-btn-action" id="scenePropsCancel">Cancel</button>
+                <button class="scene-props-btn-action primary" id="scenePropsSave">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Track Properties Popup -->
+    <div class="scene-props-overlay" id="trackPropsOverlay">
+        <div class="scene-props-popup">
+            <div class="scene-props-header">
+                <span class="scene-props-title">Track Properties</span>
+                <button class="scene-props-close" id="trackPropsClose">&times;</button>
+            </div>
+            <div class="scene-props-form">
+                <div class="scene-props-field">
+                    <label class="scene-props-label">Name</label>
+                    <input type="text" class="scene-props-input" id="trackPropsName" placeholder="Track name">
+                </div>
+            </div>
+            <div class="scene-props-manage">
+                <button class="scene-props-btn-manage" id="trackPropsClone" title="Clone Track">Clone</button>
+                <button class="scene-props-btn-manage danger" id="trackPropsDelete" title="Delete Track">Delete</button>
+                <button class="scene-props-btn-manage" id="trackPropsMoveLeft" title="Move Left">Move Left</button>
+                <button class="scene-props-btn-manage" id="trackPropsMoveRight" title="Move Right">Move Right</button>
+            </div>
+            <div class="scene-props-actions">
+                <button class="scene-props-btn-action" id="trackPropsCancel">Cancel</button>
+                <button class="scene-props-btn-action primary" id="trackPropsSave">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Clip Editor Modal -->
+    <div class="clip-editor-overlay" id="clipEditorOverlay">
+        <div class="clip-editor">
+            <div class="track-buttons-section">
+                <div class="track-buttons" id="trackButtons">
+                    <button class="play-all-btn" id="playAllTracksBtn" title="Play/Pause All Tracks">
+                        <span class="icon icon-play"></span>
+                    </button>
+                    <button class="stop-all-btn" id="stopAllTracksBtn" title="Stop All Tracks">
+                        <span class="icon icon-stop"></span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="editor-toolbar">
+                <button class="tool-btn play-btn" id="clipPlayBtn" title="Play Clip (Space)">
+                    <span class="icon icon-play"></span>
+                </button>
+                <button class="tool-btn" id="clipStopBtn" title="Stop (Esc)">
+                    <span class="icon icon-stop"></span>
+                </button>
+                <div class="toolbar-separator"></div>
+                <button class="tool-btn active" id="pencilTool" title="Note Entry Mode (N)">
+                    <span class="icon icon-pencil"></span>
+                </button>
+                <button class="tool-btn" id="selectTool" title="Selection Mode (S)">
+                    <span class="icon icon-select"></span>
+                </button>
+                <div class="toolbar-separator"></div>
+                <button class="tool-btn" id="automationTool" title="Automation View (A)">
+                    <span class="icon icon-automation"></span>
+                </button>
+                <button class="tool-btn" id="overviewToggle" title="Toggle Track Overview (O)">
+                    <span class="icon icon-overview"></span>
+                </button>
+                <button class="tool-btn" id="openWizard" title="Wizard">
+                    <span class="icon icon-import-wizard"></span>
+                </button>
+                <div class="toolbar-separator"></div>
+                <button class="tool-btn" id="trackSettingsBtn" title="Track Settings (S)">
+                    <span class="icon icon-settings"></span>
+                </button>
+                <button class="tool-btn" id="vstUiBtn" title="Show VST Plugin UI" style="display: none;">
+                    <span class="icon icon-synth"></span>
+                </button>
+
+                <button class="tool-btn" id="trackFxBtn" title="Track Effects (F)">
+                    <span class="icon icon-effects"></span>
+                </button>
+                <div class="toolbar-separator"></div>
+                <div class="toolbar-group">
+                    <select id="lengthSelect" class="toolbar-select" title="Track Length">
+                        <option value="16">1 bar (16 steps)</option>
+                        <option value="32">2 bars (32 steps)</option>
+                        <option value="48">3 bars (48 steps)</option>
+                        <option value="64" selected>4 bars (64 steps)</option>
+                        <option value="80">5 bars (80 steps)</option>
+                        <option value="96">6 bars (96 steps)</option>
+                        <option value="112">7 bars (112 steps)</option>
+                        <option value="128">8 bars (128 steps)</option>
+                        <option value="144">9 bars (144 steps)</option>
+                        <option value="160">10 bars (160 steps)</option>
+                        <option value="176">11 bars (176 steps)</option>
+                        <option value="192">12 bars (192 steps)</option>
+                        <option value="208">13 bars (208 steps)</option>
+                        <option value="224">14 bars (224 steps)</option>
+                        <option value="240">15 bars (240 steps)</option>
+                        <option value="256">16 bars (256 steps)</option>
+                    </select>
+                    <span class="toolbar-info"><span id="barsDisplay">4</span> bars</span>
+                </div>
+                <div class="toolbar-separator"></div>
+                <button class="tool-btn danger" id="clearClipBtn" title="Clear Track">
+                    <span class="icon icon-trash"></span>
+                </button>
+
+            </div>
+
+            <!-- Track Overview (above piano roll, synchronized scrolling) -->
+            <div class="track-overview-container" id="trackOverviewContainer">
+                <div class="track-overview-labels" id="trackOverviewLabels"></div>
+                <div class="track-overview-scroll" id="trackOverviewScroll">
+                    <canvas id="trackOverviewCanvas"></canvas>
+                </div>
+            </div>
+
+            <div class="piano-roll-container" id="pianoRollContainer">
+                <div class="piano-roll-scroll" id="pianoRollScroll">
+                    <div class="piano-keys">
+                        <canvas id="pianoKeysCanvas"></canvas>
+                    </div>
+                    <div class="piano-grid-wrapper" id="pianoGridWrapper">
+                        <canvas id="pianoGridCanvas" class="piano-grid"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sample Toolbar (hidden by default) -->
+            <div class="sample-toolbar" id="sampleToolbar" style="display: none;">
+                <input type="file" id="sampleFileInput" accept="audio/*" style="display: none;">
+                <button class="sample-tool-btn" id="sampleLoadBtn" title="Load Audio File">
+                    <span class="icon icon-upload"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleRestoreBtn" title="Restore Original">
+                    <span class="icon icon-restore"></span>
+                </button>
+                <div class="sample-toolbar-separator"></div>
+                <button class="sample-tool-btn" id="sampleTrimBtn" title="Trim to Selection">
+                    <span class="icon icon-trim"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleCutBtn" title="Cut Selection">
+                    <span class="icon icon-cut"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleCopyBtn" title="Copy Selection">
+                    <span class="icon icon-copy"></span>
+                </button>
+                <button class="sample-tool-btn" id="samplePasteBtn" title="Paste">
+                    <span class="icon icon-paste"></span>
+                </button>
+                <div class="sample-toolbar-separator"></div>
+                <button class="sample-tool-btn" id="sampleSilenceBtn" title="Silence Selection">
+                    <span class="icon icon-silence"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleFadeInBtn" title="Fade In">
+                    <span class="icon icon-fade-in"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleFadeOutBtn" title="Fade Out">
+                    <span class="icon icon-fade-out"></span>
+                </button>
+                <div class="sample-toolbar-separator"></div>
+                <button class="sample-tool-btn" id="sampleWarpBtn" title="Warp to Project BPM">
+                    <span class="icon icon-warp"></span>
+                </button>
+                <div class="sample-toolbar-separator"></div>
+                <button class="sample-tool-btn" id="sampleOffsetLeftBtn" title="Offset Left (10ms)">
+                    <span class="icon icon-chevron-left"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleOffsetRightBtn" title="Offset Right (10ms)">
+                    <span class="icon icon-chevron-right"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleShrinkBtn" title="Shrink (1%)">
+                    <span class="icon icon-shrink"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleStretchBtn" title="Stretch (1%)">
+                    <span class="icon icon-stretch"></span>
+                </button>
+                <div class="sample-toolbar-separator"></div>
+                <button class="sample-tool-btn" id="sampleZoomInBtn" title="Zoom In">
+                    <span class="icon icon-zoom-in"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleZoomOutBtn" title="Zoom Out">
+                    <span class="icon icon-zoom-out"></span>
+                </button>
+                <button class="sample-tool-btn" id="sampleZoomFitBtn" title="Zoom to Fit">
+                    <span class="icon icon-zoom-fit"></span>
+                </button>
+                <div class="sample-file-info">
+                    <span id="sampleFileName">No file loaded</span>
+                </div>
+            </div>
+
+            <!-- Sample Editor (hidden by default) -->
+            <div class="sample-editor-container" id="sampleEditorContainer" style="display: none;">
+                <div class="sample-waveform-scroll">
+                    <div class="sample-waveform-wrapper">
+                        <canvas id="sampleWaveformCanvas"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Automation View (hidden by default) -->
+            <div class="automation-view" id="automationView" style="display: none;">
+                <div class="automation-note-preview">
+                    <div class="automation-note-preview-label">Notes</div>
+                    <div class="automation-note-preview-container">
+                        <canvas id="automationNoteCanvas"></canvas>
+                    </div>
+                </div>
+                <div class="automation-editor">
+                    <div class="automation-params-container">
+                        <div class="automation-params-section">
+                            <div class="automation-params-header">MIDI</div>
+                            <div class="automation-params automation-params-midi">
+                                <div class="automation-param active" data-param="velocity" data-param-type="midi">Velocity</div>
+                                <div class="automation-param" data-param="pan" data-param-type="midi">Pan</div>
+                                <div class="automation-param" data-param="pitchBend" data-param-type="midi">Pitch Bend</div>
+                                <div class="automation-param" data-param="modulation" data-param-type="midi">Modulation</div>
+                            </div>
+                        </div>
+                        <div class="automation-params-section automation-params-vst-section" id="automationVstSection" style="display: none;">
+                            <div class="automation-params-header">
+                                <span id="automationVstPluginName">Plugin</span>
+                            </div>
+                            <div class="automation-params automation-params-vst" id="automationVstParams">
+                                <!-- VST parameters will be populated dynamically -->
+                            </div>
+                        </div>
+                    </div>
+                    <div class="automation-bars-wrapper">
+                        <canvas id="automationBarsCanvas"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Warp Modal -->
+    <div class="warp-modal-overlay" id="warpModal" style="display: none;">
+        <div class="warp-modal">
+            <div class="warp-modal-header">
+                <span class="warp-modal-title">Warp Sample</span>
+            </div>
+            <div class="warp-modal-body">
+                <div class="warp-modal-row">
+                    <label>Detected Sample BPM:</label>
+                    <input type="number" id="warpBpmInput" class="warp-bpm-input" min="20" max="300" step="0.1">
+                </div>
+                <div class="warp-modal-row">
+                    <label>Project BPM:</label>
+                    <span id="warpProjectBpm" class="warp-project-bpm">120</span>
+                </div>
+                <div class="warp-modal-info">
+                    The sample will be time-stretched to match the project tempo.
+                </div>
+            </div>
+            <div class="warp-modal-footer">
+                <button class="warp-modal-btn cancel" onclick="SampleEditor.hideWarpDialog()">Cancel</button>
+                <button class="warp-modal-btn ok" onclick="SampleEditor.applyWarp()">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Track Settings Modal -->
+    <div class="track-settings-overlay" id="trackSettingsModal" style="display: none;">
+        <div class="track-settings-modal">
+            <div class="track-settings-header">
+                <span class="track-settings-title">Track Settings</span>
+                <button class="track-settings-close" id="trackSettingsCloseBtn">&times;</button>
+            </div>
+            <div class="track-settings-body">
+                <div class="track-settings-row">
+                    <label>Track Name:</label>
+                    <span id="trackSettingsName" style="color: #d5a865; font-weight: 600;">Track 1</span>
+                </div>
+                <div class="track-settings-row">
+                    <label>Track Type:</label>
+                    <select id="trackTypeSelect" class="track-settings-select">
+                        <option value="melody">VST Instrument</option>
+                        <option value="sampled_instrument">Sampled Instrument</option>
+                        <option value="sample">Sample</option>
+                    </select>
+                </div>
+                <div class="track-settings-row track-settings-row-vst" id="vstInstrumentRow">
+                    <label>VST Instrument:
+                        <button class="vst-show-ui-inline-btn" id="vstShowUiInlineBtn" title="Open VST Plugin UI">Show UI</button>
+                    </label>
+                    <div class="vst-inline-container">
+                        <input type="text" id="vstInstrumentSearch" class="vst-inline-search" placeholder="Search instruments...">
+                        <div class="vst-inline-list" id="vstInstrumentList">
+                            <!-- Instrument list populated by InstrumentSelector.loadAndRenderInline -->
+                        </div>
+                    </div>
+                </div>
+                <div class="track-settings-row" id="samplerInstrumentRow" style="display: none;">
+                    <label>Sampler Instrument:</label>
+                    <select id="samplerInstrumentSelect" class="track-settings-select">
+                        <!-- Options populated dynamically from api/samplerInstrumentList.json -->
+                    </select>
+                    <span id="samplerLoadingIndicator" style="display: none; color: #d5a865; margin-left: 8px; font-size: 12px;">Loading...</span>
+                </div>
+                <div class="track-settings-row" id="trackPlaybackRow">
+                    <label>Playback:</label>
+                    <select id="trackPlaybackMode" class="track-settings-select">
+                        <option value="loop">Loop</option>
+                        <option value="oneshot">One-Shot</option>
+                    </select>
+                </div>
+                <div class="track-settings-row" id="trackPercussionRow">
+                    <label>Percussion:</label>
+                    <div class="track-settings-checkbox">
+                        <input type="checkbox" id="trackPercussionCheckbox">
+                        <span style="color: #666; font-size: 11px;">Use drum names and MIDI channel 10</span>
+                    </div>
+                </div>
+                <div class="track-settings-row" id="scaleSettingsRow">
+                    <label>Scale:</label>
+                    <div class="track-settings-scale">
+                        <select id="scaleRootSelect" class="track-settings-select" title="Root Note">
+                            <option value="0">C</option>
+                            <option value="1">C#</option>
+                            <option value="2">D</option>
+                            <option value="3">D#</option>
+                            <option value="4">E</option>
+                            <option value="5">F</option>
+                            <option value="6">F#</option>
+                            <option value="7">G</option>
+                            <option value="8">G#</option>
+                            <option value="9">A</option>
+                            <option value="10">A#</option>
+                            <option value="11">B</option>
+                        </select>
+                        <select id="scaleTypeSelect" class="track-settings-select" title="Scale Type">
+                            <option value="none">None</option>
+                            <option value="major">Major</option>
+                            <option value="minor">Natural Minor</option>
+                            <option value="harmonic-minor">Harmonic Minor</option>
+                            <option value="melodic-minor">Melodic Minor</option>
+                            <option value="pentatonic-major">Pentatonic Major</option>
+                            <option value="pentatonic-minor">Pentatonic Minor</option>
+                            <option value="blues">Blues</option>
+                            <option value="dorian">Dorian</option>
+                            <option value="phrygian">Phrygian</option>
+                            <option value="lydian">Lydian</option>
+                            <option value="mixolydian">Mixolydian</option>
+                            <option value="locrian">Locrian</option>
+                            <option value="chromatic">Chromatic</option>
+                        </select>
+                        <div class="track-settings-checkbox">
+                            <input type="checkbox" id="trackHideNotesNotInScale">
+                            <span style="color: #666; font-size: 11px;">Hide Non Scale</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="track-settings-row" id="midiChannelRow">
+                    <label>MIDI :</label>
+                    <select id="trackMidiChannel" class="track-settings-select">
+                        <option value="0">Ch. 1</option>
+                        <option value="1">Ch. 2</option>
+                        <option value="2">Ch. 3</option>
+                        <option value="3">Ch. 4</option>
+                        <option value="4">Ch. 5</option>
+                        <option value="5">Ch. 6</option>
+                        <option value="6">Ch. 7</option>
+                        <option value="7">Ch. 8</option>
+                        <option value="8">Ch. 9</option>
+                        <option value="9">Ch. 10 (Drums)</option>
+                        <option value="10">Ch. 11</option>
+                        <option value="11">Ch. 12</option>
+                        <option value="12">Ch. 13</option>
+                        <option value="13">Ch. 14</option>
+                        <option value="14">Ch. 15</option>
+                        <option value="15">Ch. 16</option>
+                    </select>
+                    <select id="trackMidiInstrument" class="track-settings-select">
+                        <!-- Options populated dynamically from AppState.GM_INSTRUMENTS -->
+                    </select>
+                </div>
+            </div>
+            <div class="track-settings-footer">
+                <button class="track-settings-btn" id="trackSettingsSaveBtn">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sample File Browser Modal (for JUCE WebView) -->
+    <div class="file-browser-overlay" id="sampleFileBrowserModal" style="display: none;">
+        <div class="file-browser-modal">
+            <div class="file-browser-header">
+                <span class="file-browser-title">Select Sample</span>
+                <button class="file-browser-close" id="sampleFileBrowserCloseBtn">&times;</button>
+            </div>
+            <div class="file-browser-path" id="sampleFileBrowserPath">samples</div>
+            <div class="file-browser-content">
+                <div class="file-browser-tree-pane" id="sampleFileBrowserTree">
+                    <!-- Tree view will be populated here -->
+                </div>
+                <div class="file-browser-file-pane" id="sampleFileBrowserFiles">
+                    <!-- File list will be populated here -->
+                </div>
+            </div>
+            <div class="file-browser-footer">
+                <button class="file-browser-btn cancel" id="sampleFileBrowserCancelBtn">Cancel</button>
+                <button class="file-browser-btn open" id="sampleFileBrowserOpenBtn" disabled>Open</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Track FX Chain Modal -->
+    <div class="fx-chain-overlay" id="fxChainModal" style="display: none;">
+        <div class="fx-chain-modal">
+            <div class="fx-chain-header">
+                <span class="fx-chain-title">Track FX Chain - <span id="fxChainTrackName">Track 1</span></span>
+                <button class="fx-chain-close" id="fxChainCloseBtn">&times;</button>
+            </div>
+            <div class="fx-chain-content">
+                <div class="fx-chain-column">
+                    <div class="fx-chain-column-header">Available Plugins</div>
+                    <div class="fx-chain-search">
+                        <input type="text" id="fxPluginSearch" placeholder="Search plugins...">
+                    </div>
+                    <div class="fx-chain-list" id="fxAvailablePlugins">
+                        <!-- Available plugins will be populated here -->
+                    </div>
+                </div>
+                <div class="fx-chain-actions">
+                    <button class="fx-chain-action-btn" id="fxAddBtn" title="Add to chain">
+                        <span>&rarr;</span>
+                    </button>
+                    <button class="fx-chain-action-btn" id="fxRemoveBtn" title="Remove from chain">
+                        <span>&larr;</span>
+                    </button>
+                </div>
+                <div class="fx-chain-column">
+                    <div class="fx-chain-column-header">Track FX Chain (in order)</div>
+                    <div class="fx-chain-order-btns">
+                        <button class="fx-chain-order-btn" id="fxMoveUpBtn" title="Move up">&#9650;</button>
+                        <button class="fx-chain-order-btn" id="fxMoveDownBtn" title="Move down">&#9660;</button>
+                    </div>
+                    <div class="fx-chain-list" id="fxTrackChain">
+                        <!-- Track FX chain will be populated here -->
+                    </div>
+                </div>
+            </div>
+            <div class="fx-chain-footer">
+                <button class="fx-chain-btn cancel" id="fxChainCancelBtn">Cancel</button>
+                <button class="fx-chain-btn apply" id="fxChainApplyBtn">Apply</button>
+            </div>
+        </div>
+    </div>
+
+
+<!---------------------------------------------------------------------------->    
+
+<div class="file-browser-overlay" id="Import" style="display: none;">
+    <div class="import-modal">
+        <div class="file-browser-header">
+            <span class="file-browser-title" id="Import_DlgTitle">Import Wizard</span>
+            <button class="file-browser-close" id="Import_close">&times;</button>
+        </div>
+    
+  <div id="Import_body">
+
+  <label class='import-label'>Wizard</label>
+    <div class="dropdown-container" id=DrumPatternImportTypeHolder >
+      <select class='dropdown' id="ImportType" onchange="OnChangeImportType()">
+        <option value="ABC">ABC Notation</option>
+        <option value="Drums">Drums</option>
+        <option value="ChordProg">Chord Progression</option>
+        <option value="GNotes">GNotes</option>
+        <option value="Midi">MIDI File</option>
+      </select>
+    </div>  
+    <hr class='import-hr'>
+
+    <div id="ABCWizard">
+      <textarea rows="5" cols="20" id="ABCWizardText">
+X: 2
+T:Happy Birthday
+M:3/4
+L:1/4
+Q:1/4=90
+K:G
+V:1 clef=bass
+D,/2>D,/2| E, D, G,| F,2 D,/2>D,/2| E, D, A,| G,2 D,/2>D,/2| 
+d, B, G,| F, E, c,/2>c,/2| B, G, A,| G,2|]
+      </textarea>
+    </div>
+<!--
+X: 2
+T:Happy Birthday
+M:3/4
+L:1/4
+Q:1/4=90
+K:G
+V:1 clef=bass
+D,/2>D,/2| E, D, G,| F,2 D,/2>D,/2| E, D, A,| G,2 D,/2>D,/2| 
+d, B, G,| F, E, c,/2>c,/2| B, G, A,| G,2|]    
+-->    
+
+
+    <div id="DrumWizard">
+    <table>
+        <tr>
+        <td>
+            <div class="dropdown-container" id=DrumPatternNameHolder >
+                <select class='dropdown' id="DrumPatternName" onchange="OnChangeDrumPatternName()"></select>
+            </div>  
+        </td>
+        <td>
+            <div class="dropdown-container" id=DrumPatternStyleHolder>
+                <select class='dropdown' id="DrumPatternStyle" onchange="OnChangeDrumPatternStyle()"></select>
+            </div>  
+        </td>
+        </tr>
+     </table>
+
+     <hr class='import-hr'>
+
+      <div id="DrumPatternTable">
+          Preview
+      </div>  
+
+      <hr class='import-hr'>
+
+      <textarea rows="5" cols="20" id="DrumWizardText">
+|Drum|01|02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|
+|----|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|
+|AC  |  |  |  |  | X|  |  |  |  |  |  |  | X|  |  |  |
+|CH  | X|  |  |  | X|  |  |  | X|  |  |  | X|  |  |  |
+|SD  |  |  |  |  | X|  |  |  |  |  |  |  | X|  |  |  |
+|BD  | X|  |  |  |  |  | X|  | X|  |  |  |  |  |  |  |
+      </textarea>
+
+    </div>
+
+    <div id="ChordArpGenWizard">
+    </div>
+
+
+    <div id="MidiImportWizard" style="display: none;">
+        <div style="margin-bottom: 10px;">
+            <label class="import-label" style="display: block; margin-bottom: 5px;">Select MIDI File</label>
+            <input type="file" id="midiFileInput" accept=".mid,.midi" style="display: none;">
+            <button class="btn" id="midiFileBtn" onclick="document.getElementById('midiFileInput').click()">
+                Choose File
+            </button>
+            <span id="midiFileName" style="margin-left: 10px; color: #888;">No file selected</span>
+        </div>
+        <div id="midiTrackInfo" style="margin-bottom: 10px; color: #aaa; font-size: 12px;"></div>
+    </div>
+
+    <div id="GNotesWizard">
+<textarea rows="5" cols="20" id="GNotesWizardText">
+#34 C
+</textarea>
+<!--
+#54 C 3(C) Z  D#  Z  EbA CD  2(CD DE)  
+&54 CMaj   Cmin   2(Cmin Cmin) 2(Cmin Dmin) 2(Fmaj7 Fmaj7)  
+-->      
+</div>
+
+    <hr class='import-hr'>
+
+        </div>
+        <div class="file-browser-footer" style="justify-content: space-between;">
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <div>
+                    <label style="font-size: 12px; color: #888;">Action</label>
+                    <select class='dropdown' id="ImportClear" style="margin-left: 5px;">
+                        <option value="1">Clear</option>
+                        <option value="0">Append</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="font-size: 12px; color: #888;">Merge Tracks</label>
+                    <select class='dropdown' id="ImportMergeTracks" style="margin-left: 5px;">
+                        <option value="1">Yes</option>
+                        <option value="0">No</option>
+                    </select>
+                </div>
+            </div>
+            <button class="file-browser-btn open" id="Import_ok">Import</button>
+        </div>
+    </div>
+</div>
+
+
+<!------------------------------------------------------------------------------------------------------>
+
+
+    <script src="dist/jquery-4.0.0.min.js"></script>
+    <script src="dist/Midi.js"></script>
+    <script src="dist/abcjs-basic-min.js"></script>
+
+    <!-- Load JavaScript modules -->
+    <script src="js/app-state.js"></script>
+    <script src="js/audio-bridge.js"></script>
+    <script src="js/song-screen.js"></script>
+    <script src="js/clip-editor.js"></script>
+    <script src="js/tab-manager.js"></script>
+    <script src="js/sample-editor.js"></script>
+    <script src="js/fx-chain.js"></script>
+    <script src="js/instrument-selector.js"></script>
+
+
+    <script src="js/chords.js"></script>
+    <script src="js/gchordarpgen.js"></script>
+    <script src="js/drum-patterns.js"></script>
+    <script src="js/gnoteparser.js"></script>
+    <script src="js/abcjsparser.js"></script>
+    <script src="js/melodygenerator.js"></script>
+    <script src="js/midi-importer.js"></script>
+
+    <script src="js/gimportdialog.js"></script>
+
+
+    <script>
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', () => {
+            // Update CSS variable for initial track count
+            document.documentElement.style.setProperty('--num-tracks', AppState.numTracks);
+
+            // Initialize Song Screen
+            SongScreen.createGrid();
+
+            // Initialize Clip Editor event listeners
+            ClipEditor.init();
+
+            // Initialize Sample Editor
+            SampleEditor.init();
+
+            InitImportDialog();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,333 @@
+  .import-hr
+  {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #d5a865;
+  }
+
+  .hr-menu
+  {
+    border: 1px solid #634e2e;
+  }
+
+  .import-label
+  {
+    color: #d5a865;
+    display: block;
+    font-size: 12px;
+    padding-top: 10px;
+  }
+
+
+.modal
+{
+
+    font-family: Arial, sans-serif;
+    font-size: 12pt;
+  /*
+  z-index: 100;
+  display: none;
+  position: absolute;
+  */
+
+  /*
+  background-color: #E0E5EC;
+  border-radius: 15px;
+
+  box-shadow: 
+      9px 9px 16px rgb(163,177,198,0.6), 
+      -9px -9px 16px rgba(255,255,255, 0.5);
+*/
+
+  /*background-color: #E0E5EC;*/
+  color: #d5a865;
+  background: #242424; /* Neutral background for the button */
+  border-radius: 15px;
+  
+  /*
+  box-shadow: 
+      9px 9px 16px rgb(163,177,198,0.6), 
+      -9px -9px 16px rgba(255,255,255, 0.5);
+      */
+      box-shadow: 
+      9px 9px 16px rgba(0, 0, 0, 0.7), 
+      -9px -9px 16px rgba(255, 255, 255, 0.1); /* Neumorphic shadows */
+
+  padding: 15px;
+
+}
+
+.input-container {
+    position: relative;
+    width: 236px;
+    /*padding: 15px;*/
+    /*min-width: 150px;*/
+  }  
+
+  .input {
+    width: 100%;
+    padding: 8px;
+    
+    border: none;
+    outline: none;
+
+    background: #242424; /* Neutral background for the button */
+    border-radius: 10px;
+        box-shadow: 
+        5px 5px 10px rgba(0, 0, 0, 0.7), 
+        5px 5px 10px rgba(255, 255, 255, 0.1); /* Neumorphic shadows */
+
+    font-size: 14px;
+    appearance: none;
+    cursor: pointer;
+
+    color: #d5a865;
+  }
+
+
+.dropdown-container 
+  {
+      position: relative;
+      /*width: 100px;*/
+      /*padding: 15px;*/
+      min-width: 150px;
+  }
+
+  .dropdown-container-small 
+  {
+    position: relative;
+    min-width: 100px;
+  }
+
+
+  .dropdown {
+      width: 100%;
+      padding: 8px;
+      
+      
+      border: none;
+      outline: none;
+      /*
+      background: #ecf0f3;
+      box-shadow:  
+            5px 5px 10px #d1d9e6,  
+            -5px -5px 10px #ffffff;
+            */
+
+      background: #242424; /* Neutral background for the button */
+      border-radius: 10px;
+          box-shadow: 
+          5px 5px 10px rgba(0, 0, 0, 0.7), 
+          5px 5px 10px rgba(255, 255, 255, 0.1); /* Neumorphic shadows */
+
+      font-size: 14px;
+      appearance: none;
+      cursor: pointer;
+
+      color: #d5a865;
+  }
+
+  .dropdown:hover {
+      box-shadow: 
+       5px 5px 10px #866a3f, 
+       -5px -5px 10px #433521;
+  }
+
+  .dropdown:focus {
+    box-shadow: 
+    5px 5px 10px #866a3f, 
+    -5px -5px 10px #433521;
+  }
+
+  .dropdown-container::after {
+      content: '\25BC'; /* Downward arrow */
+      font-size:12px;
+      position: absolute;
+      top: 50%;
+      right: 15px;
+      transform: translateY(-50%);
+      pointer-events: none;
+      color: #7d8da5;
+  }
+
+    .droplist {
+    width: 100%;
+    padding: 8px;
+    
+    border: none;
+    outline: none;
+
+    background: #242424; /* Neutral background for the button */
+    border-radius: 10px;
+        box-shadow: 
+        5px 5px 10px rgba(0, 0, 0, 0.7), 
+        5px 5px 10px rgba(255, 255, 255, 0.1); /* Neumorphic shadows */
+
+    font-size: 14px;
+    appearance: none;
+    cursor: pointer;
+
+    color: #d5a865;
+}
+
+.droplist:hover {
+    box-shadow: 
+     5px 5px 10px #866a3f, 
+     -5px -5px 10px #433521;
+}
+
+.droplist:focus {
+  box-shadow: 
+  5px 5px 10px #866a3f, 
+  -5px -5px 10px #433521;
+}
+
+#ABCWizardText
+{
+  width: 400px;
+  height: 200px;
+  background: #242424; /* Neutral background for the button */
+  color: #d5a865;
+}
+
+
+#DrumWizardText
+{
+  width: 400px;
+  height: 200px;
+  background: #242424; /* Neutral background for the button */
+  color: #d5a865;
+}
+
+#GNotesWizardText , #ChordMelodyWizardText
+{
+  width: 400px;
+  height: 200px;
+  background: #242424; /* Neutral background for the button */
+  color: #d5a865;
+}
+
+.import_label
+{
+    font-size: 12px ;
+    color: #d5a865;
+}
+
+
+/****************************************************************************************/
+.drumpat_table
+{
+  border-collapse: collapse;
+}
+
+.drumpat_tr
+{
+    height: 50px;
+}
+
+.drumpat_td
+{
+    border: 1px solid #777;
+    width:30px;
+    height: 30px;
+    text-align: center;
+    padding:3px;
+    color: #d5a865;
+}
+
+.drumpat_filled
+{
+    background-color: rebeccapurple;
+}
+
+.drumpat_headertd
+{
+    background-color: rgb(55, 55, 55);
+}
+
+.drumpat_accent
+{
+    background-color: rgb(75, 59, 76);
+}
+
+.drumpat_titlecell
+{
+    width: 100px;
+}
+
+
+.neumorphic-button:focus
+{
+  outline: none;
+  border-color: 1px solid #d5a865;
+}
+
+.neumorphic-button {
+  border: none;
+  
+  
+  background: #242424; /* Neutral background for the button */
+  box-shadow: 
+      10px 10px 20px rgba(0, 0, 0, 0.7), 
+      -10px -10px 20px rgba(255, 255, 255, 0.1); /* Neumorphic shadows */
+  
+  margin-right: 12px;
+  margin-bottom: 8px;
+  position: relative;
+  color: #d5a865;
+  
+  text-align: center;
+}
+
+/* This has to come in the last since it has highest priority*/
+.neumorphic-button:hover {
+  box-shadow: 
+  5px 5px 10px #5b482b, 
+  -5px -5px 10px #433521;
+}
+
+.neumorphic-button:focus
+{
+  outline: none;
+  border-color: 1px solid #d5a865;
+}
+
+
+.neumorphic-std-button {
+  padding-top: 3px;
+  /*width: 50px;*/
+  padding-left: 10px;
+  padding-right: 10px;
+  height: 30px;
+  border: none;
+  border-radius: 15px;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  outline: none;
+  /*transition: all 0.3s ease;*/
+}
+
+.neumorphic-ok-button {
+  width: 50px;
+  
+  border: none;
+  border-radius: 15px;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  outline: none;
+  /*transition: all 0.3s ease;*/
+}
+
+.neumorphic-cancel-button {
+  width: 90px;
+  
+  border: none;
+  border-radius: 15px;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  outline: none;
+  /*transition: all 0.3s ease;*/
+}

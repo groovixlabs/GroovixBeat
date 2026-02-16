@@ -1210,6 +1210,20 @@ SequencerComponent::~SequencerComponent()
         trackInstrumentNodes.clear();
     }
 
+    // Remove sampler instrument nodes from the graph
+    if (!samplerInstrumentNodes.empty())
+    {
+        DBG("SequencerComponent::~SequencerComponent - removing " +
+            juce::String((int)samplerInstrumentNodes.size()) + " sampler instrument nodes");
+
+        for (const auto& pair : samplerInstrumentNodes)
+        {
+            samplerInstrumentManager.unregisterInstrumentForTrack(pair.first);
+            pluginGraph.graph.removeNode(pair.second);
+        }
+        samplerInstrumentNodes.clear();
+    }
+
     // Remove sample player nodes from the graph (if any were created)
     if (!samplePlayerNodes.empty())
     {

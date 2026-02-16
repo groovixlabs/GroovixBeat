@@ -21,6 +21,7 @@
             <button class="main-tab active" id="songTab" data-tab="song">Song</button>
             <button class="main-tab" id="editorTab" data-tab="editor">Clips</button>
             <button class="main-tab" id="mixerTab" data-tab="mixer">Mixer</button>
+            <span class="step-info" id="VersionInfo"></span>
 
             <div class="product-name-container">
                 <!--
@@ -861,11 +862,16 @@ d, B, G,| F, E, c,/2>c,/2| B, G, A,| G,2|]
     <script src="js/midi-importer.js"></script>
 
     <script src="js/gimportdialog.js"></script>
+    <script src="version.js"></script>
 
 
     <script>
         // Initialize the application
         document.addEventListener('DOMContentLoaded', () => {
+
+            document.getElementById('VersionInfo').innerText=groovixbeatjs_version;
+
+
             // Update CSS variable for initial track count
             document.documentElement.style.setProperty('--num-tracks', AppState.numTracks);
 

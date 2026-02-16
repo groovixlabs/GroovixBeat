@@ -1031,7 +1031,9 @@ bool MainHostWindow::perform (const InvocationInfo& info)
         break;
 
     case CommandIDs::aboutBox:
-        // TODO
+        AlertWindow::showMessageBoxAsync(MessageBoxIconType::InfoIcon,
+                                         "About",
+                                         "GrooviXBeat (BETA) V 1.0 " __DATE__ " " __TIME__);
         break;
 
     case CommandIDs::allWindowsForward:

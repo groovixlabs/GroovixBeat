@@ -4,6 +4,10 @@ It uses a similar workflow to Korg Gadget IPad App. You create clips with Sample
 
 This was an app I wanted personally, and wanted to test the limits of AI assisted coding. It took about a Month and over 450 interactive Prompts over dozens of sessions. It also involved manual coding and debugging when it got stuck in loops and to get it working exactly as I wanted, but all in all happy with the outcome. 
 
+
+[![IMAGE ALT TEXT HERE](https://img.youtube.com/vi/KRT71S8bwk0/0.jpg)](https://www.youtube.com/watch?v=KRT71S8bwk0)
+
+
 ![Songs Screen](https://groovixlabs.com/groovixlabs/images/GroovixBeat_01.png)
 ![Clip Editor Screen](https://groovixlabs.com/groovixlabs/images/GroovixBeat_02.png)
 

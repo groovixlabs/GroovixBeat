@@ -445,6 +445,10 @@ const AudioBridge = {
             ClipEditor.renderPianoGrid();
         }
 
+        if (typeof SampleEditor !== 'undefined' && SampleEditor.isVisible) {
+            SampleEditor.render();
+        }
+
         if (this.playingSceneIndex >= 0 && typeof SongScreen !== 'undefined') {
             SongScreen.renderClipPreviews();
         }
@@ -974,8 +978,10 @@ const AudioBridge = {
                 this.clipResumeOffset = resumePosition;
                 this.clipPaused = false;
                 this.isPlaying = true;
-                this.playbackStartTime = performance.now();
-                this.playbackSecondsPerStep = 60 / (AppState.tempo || 120) / 4;
+                const clipLen = AppState.getClip(scene, track).length || AppState.currentLength;
+                const secPerStep = 60 / (AppState.tempo || 120) / 4;
+                const clipLoop = (AppState.getClip(scene, track).playMode || 'loop') === 'loop';
+                this.startPlayheadAnimation(clipLen, secPerStep, clipLoop);
                 this.updatePlayButton(true, false);
             } else if (this.isPlaying) {
                 // Currently playing -> stop and save position
@@ -1041,8 +1047,10 @@ const AudioBridge = {
                 this.isPlaying = true;
                 this.clipPaused = false;
                 this.clipResumeOffset = 0;
-                this.playbackStartTime = performance.now();
-                this.playbackSecondsPerStep = 60 / (AppState.tempo || 120) / 4;
+                const clipLength2 = clip.length || AppState.currentLength;
+                const secPerStep2 = 60 / (AppState.tempo || 120) / 4;
+                const clipLoop2 = (clip.playMode || 'loop') === 'loop';
+                this.startPlayheadAnimation(clipLength2, secPerStep2, clipLoop2);
                 this.updatePlayButton(true, false);
             }
         }
@@ -1106,8 +1114,10 @@ const AudioBridge = {
             this.clipPaused = false;
             this.clipPausedPosition = 0;
             this.clipResumeOffset = 0;
-            this.playbackStartTime = performance.now();
-            this.playbackSecondsPerStep = 60 / (AppState.tempo || 120) / 4;
+            const clipLen3 = clip.length || AppState.currentLength;
+            const secPerStep3 = 60 / (AppState.tempo || 120) / 4;
+            const clipLoop3 = (clip.playMode || 'loop') === 'loop';
+            this.startPlayheadAnimation(clipLen3, secPerStep3, clipLoop3);
             this.updatePlayButton(true, false);
         }
         // For stop clip command

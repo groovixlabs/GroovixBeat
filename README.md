@@ -100,7 +100,6 @@ GrooviXBeat is a powerful desktop groovebox and digital audio workstation (DAW) 
 
 
 #### Licence: 
-The Non JUCE (HTML JS etc.) code here is MIT Licenced.
 Please refer to JUCE Licence for their Licence terms https://juce.com/get-juce/
 
 

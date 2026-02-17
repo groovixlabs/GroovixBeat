@@ -90,10 +90,16 @@ GrooviXBeat is a powerful desktop groovebox and digital audio workstation (DAW) 
 #### Acknowledgements.
 
 https://juce.com/
-https://docs.abcjs.net/
 
+Amazing Tutorial by  Jan Wilczek
+https://www.youtube.com/watch?v=0ALLRitFE34&list=PLrJPU5Myec8Z-8gEj3kJdMfuuuWFbpy7D&index=1
+https://www.youtube.com/@WolfSoundAudio
+
+ABCJS Importer
+https://docs.abcjs.net/
 
 #### Licence: 
 The Non JUCE (HTML JS etc.) code here is MIT Licenced.
 Please refer to JUCE Licence for their Licence terms https://juce.com/get-juce/
+
 

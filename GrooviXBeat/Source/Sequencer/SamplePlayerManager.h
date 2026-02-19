@@ -72,12 +72,23 @@ public:
      * Unlike queueSampleFile, this keeps the current sample playing until
      * the quantize boundary, then atomically switches to the new sample.
      * This eliminates gaps between clips in Live Mode.
+     *
+     * @param targetStartSample  Absolute audio-thread sample position at which to
+     *                           start playback.  The SamplePlayerPlugin checks this
+     *                           in its processBlock() for sample-accurate triggering.
+     *                           Pass -1 to fall back to the syncToTransport path.
      */
     void queueSampleFileSeamless(int trackIndex, const juce::String& filePath,
-                                  double offset, bool loop, double loopLengthBeats);
+                                  double offset, bool loop, double loopLengthBeats,
+                                  int64_t targetStartSample = -1);
 
-    /** Queue stop at next quantization boundary */
-    void queueStopSample(int trackIndex);
+    /**
+     * Queue stop at next quantization boundary.
+     *
+     * @param targetStopSample  Absolute audio-thread sample position at which to
+     *                          stop playback.  Pass -1 to use syncToTransport path.
+     */
+    void queueStopSample(int trackIndex, int64_t targetStopSample = -1);
 
     /** Cancel queued action for a track */
     void cancelQueuedSample(int trackIndex);
@@ -161,8 +172,13 @@ public:
     /** Clear the sample cache (called when exiting Live Mode or to free memory) */
     void clearSampleCache();
 
-    /** Reset all players for Live Mode (clears stale file paths and sources) */
-    void resetAllPlayersForLiveMode();
+    /**
+     * Reset all players for Live Mode (clears stale file paths and sources).
+     * Also synchronises each player's internal sample-position counter to
+     * currentAudioPosition so it matches the MidiClipScheduler's counter and
+     * targetStartSample comparisons work correctly.
+     */
+    void resetAllPlayersForLiveMode(int64_t currentAudioPosition = 0);
 
     /** Get a cached sample buffer, or nullptr if not cached */
     juce::AudioBuffer<float>* getCachedSample(const juce::String& filePath);

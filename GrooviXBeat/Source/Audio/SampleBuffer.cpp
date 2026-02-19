@@ -90,6 +90,13 @@ bool SampleBuffer::saveToFile(const juce::File& file) const
         return false;
     }
 
+    // Delete existing file first to avoid stale data.
+    // On Windows, File::createOutputStream() does NOT truncate — it opens at
+    // byte 0 but leaves old data beyond what's written, which corrupts the WAV
+    // if the new file is shorter than the old one.
+    if (file.existsAsFile())
+        file.deleteFile();
+
     // Create WAV writer
     juce::WavAudioFormat wavFormat;
     std::unique_ptr<juce::AudioFormatWriter> writer;
@@ -115,13 +122,18 @@ bool SampleBuffer::saveToFile(const juce::File& file) const
     // Write the buffer
     bool success = writer->writeFromAudioSampleBuffer(data, 0, data.getNumSamples());
 
+    // Flush writer to ensure all data is on disk before anyone reads the file
+    writer.reset();
+
     if (success)
     {
-        DBG("SampleBuffer: Saved to " + file.getFullPathName());
+        DBG("SampleBuffer: Saved " + juce::String(data.getNumSamples()) + " samples (" +
+            juce::String(data.getNumChannels()) + "ch, " + juce::String(sampleRate) +
+            " Hz) to " + file.getFullPathName());
     }
     else
     {
-        DBG("SampleBuffer: Failed to write data");
+        DBG("SampleBuffer: Failed to write data to " + file.getFullPathName());
     }
 
     return success;

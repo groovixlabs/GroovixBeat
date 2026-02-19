@@ -110,6 +110,21 @@ public:
     void stopTrack(int trackIndex);
     bool isTrackPlaying(int trackIndex) const;
 
+    /** Queue a track to start at the next quantize boundary (Live Mode). */
+    void queueTrackPlay(int trackIndex);
+
+    /** Queue a track to stop at the next quantize boundary (Live Mode). */
+    void queueTrackStop(int trackIndex);
+
+    /** Set the quantize step size (in 1/16th notes) for live mode boundary detection. */
+    void setQuantizeSteps(int steps);
+
+    /** Reset the live mode anchor sample (call when all live clips have stopped). */
+    void resetLiveAnchor();
+
+    /** Enable/disable live mode. In live mode, global transport does not trigger MIDI rendering. */
+    void setLiveMode(bool enabled);
+
     //==============================================================================
     // Audio thread API
 
@@ -141,6 +156,16 @@ public:
 
     /** Returns the latest audio position reported by any track's processBlock. */
     int64_t getLatestAudioPosition() const { return latestAudioPosition.load(std::memory_order_relaxed); }
+
+    /**
+     * Compute the absolute sample position of the next quantize boundary from
+     * the current transport position.  Safe to call from the message thread.
+     *
+     * Returns -1 if no timing reference has been established yet (no anchor and
+     * transport not playing).  In that case the caller should treat it as "start
+     * at the next audio block" and use getLatestAudioPosition() as the target.
+     */
+    int64_t computeNextQuantizeBoundarySample() const;
 
     //==============================================================================
     // Legacy timer-driven API (no-op, kept for compatibility during transition)
@@ -175,10 +200,17 @@ private:
         bool isPlaying = false;          // Per-track playing state (live mode)
         int64_t trackPlayStartSample = 0; // When per-track play started (for live mode)
         bool oneshotFinished = false;    // One-shot clip reached end
+        bool pendingLivePlay = false;    // Queued to start at next quantize boundary
+        bool pendingLiveStop = false;    // Queued to stop at next quantize boundary
 
         void clearActiveNotes() { activeNotes.reset(); }
     };
     std::map<int, TrackPlayState> trackPlayStates;
+
+    // Live mode quantize scheduling
+    int quantizeSteps = 16;         // Quantize size in 1/16th notes (default: 1 bar)
+    int64_t liveAnchorSample = -1;  // Sample position when first live clip started (-1 = not set)
+    bool inLiveMode = false;        // When true, global transport does not trigger MIDI rendering
 
     // SpinLock is lighter than CriticalSection for audio thread use
     // (no OS calls, just atomic compare-and-swap)

@@ -5,6 +5,48 @@
 #include "SamplePlayerPlugin.h"
 
 //==============================================================================
+// Static helper: encode an AudioBuffer as 32-bit float WAV into destBlock,
+// then return a reader backed by that block. Caller must ensure destBlock
+// outlives the returned reader. Returns nullptr on failure.
+juce::AudioFormatReader* SamplePlayerPlugin::createWavReaderFromBuffer(
+    const juce::AudioBuffer<float>& buffer,
+    double sampleRate,
+    juce::MemoryBlock& destBlock)
+{
+    destBlock.reset();
+
+    juce::WavAudioFormat wavFormat;
+
+    // AudioFormatWriter takes ownership of the stream and calls delete on it in its
+    // destructor, so we must heap-allocate it (NOT pass a stack-local address).
+    auto* mos = new juce::MemoryOutputStream(destBlock, false);
+    auto writer = std::unique_ptr<juce::AudioFormatWriter>(
+        wavFormat.createWriterFor(mos,
+                                  sampleRate,
+                                  static_cast<unsigned int>(buffer.getNumChannels()),
+                                  32,   // 32-bit float — lossless
+                                  {},
+                                  0));
+    if (writer == nullptr)
+    {
+        delete mos;
+        return nullptr;
+    }
+
+    writer->writeFromAudioSampleBuffer(buffer, 0, buffer.getNumSamples());
+    writer.reset(); // flush/close WAV; also deletes mos → destBlock is populated
+
+    // Create a reader from the encoded WAV data.
+    // MemoryInputStream does NOT copy — destBlock must stay alive.
+    auto* mis = new juce::MemoryInputStream(destBlock.getData(), destBlock.getSize(), false);
+    auto* reader = wavFormat.createReaderFor(mis, true); // reader takes ownership of mis
+    if (reader == nullptr)
+        delete mis;
+
+    return reader;
+}
+
+//==============================================================================
 SamplePlayerPlugin::SamplePlayerPlugin()
     : AudioProcessor(BusesProperties()
           .withOutput("Output", juce::AudioChannelSet::stereo(), true))
@@ -31,16 +73,13 @@ bool SamplePlayerPlugin::loadFile(const juce::String& filePath)
 
     DBG("SamplePlayerPlugin::loadFile CALLED with path: '" + filePath + "'");
     DBG("SamplePlayerPlugin::loadFile - Previous currentFilePath: '" + currentFilePath + "'");
-    DBG("SamplePlayerPlugin::loadFile - useEditableBuffer was: " + juce::String(useEditableBuffer ? "true" : "false"));
 
-    // Stop current playback
+    // Stop current playback and release reader before clearing memory block
     playing = false;
     transportSource.stop();
     transportSource.setSource(nullptr);
     readerSource.reset();
-
-    // IMPORTANT: Reset editable buffer mode so we use transportSource for playback
-    useEditableBuffer = false;
+    cachedMemoryBlock.reset();   // safe to clear now that reader is gone
 
     juce::File file(filePath);
     DBG("SamplePlayerPlugin::loadFile - File object path: '" + file.getFullPathName() + "'");
@@ -97,59 +136,50 @@ bool SamplePlayerPlugin::loadFromCachedBuffer(const juce::String& filePath,
         " samples: " + juce::String(cachedBuffer.getNumSamples()) +
         " sampleRate: " + juce::String(bufferSampleRate));
 
-    // Stop current playback
+    if (cachedBuffer.getNumSamples() == 0 || bufferSampleRate <= 0)
+    {
+        DBG("SamplePlayerPlugin: Invalid cached buffer for: " + filePath);
+        return false;
+    }
+
+    // Stop current playback and release existing source before touching cachedMemoryBlock
     playing = false;
     transportSource.stop();
     transportSource.setSource(nullptr);
     readerSource.reset();
+    cachedMemoryBlock.reset();   // safe to clear now that reader is gone
 
-    // Load the cached buffer into sampleEditor for in-memory playback
-    if (!sampleEditor)
-        sampleEditor = std::make_unique<SampleEditor>();
-
-    // Load directly from the cached buffer
-    bool success = sampleEditor->loadFromBuffer(cachedBuffer, bufferSampleRate);
-
-    if (success)
+    // Encode the cached buffer as 32-bit float WAV into cachedMemoryBlock
+    auto* reader = createWavReaderFromBuffer(cachedBuffer, bufferSampleRate, cachedMemoryBlock);
+    if (reader == nullptr)
     {
-        currentFilePath = filePath;
-        fileSampleRate = bufferSampleRate;
-        fileLengthSamples = static_cast<juce::int64>(cachedBuffer.getNumSamples());
-        useEditableBuffer = true;
-        editablePlayPosition = 0;
-
-        DBG("SamplePlayerPlugin: Loaded from cache " + filePath +
-            " (duration: " + juce::String(getLengthInSeconds(), 2) + "s)");
-    }
-    else
-    {
-        DBG("SamplePlayerPlugin: Failed to load from cache: " + filePath);
+        DBG("SamplePlayerPlugin: Failed to encode cached buffer as WAV: " + filePath);
+        return false;
     }
 
-    return success;
+    fileSampleRate = reader->sampleRate;
+    fileLengthSamples = reader->lengthInSamples;
+
+    readerSource = std::make_unique<juce::AudioFormatReaderSource>(reader, true);
+    readerSource->setLooping(loopEnabled && !useBeatsForLoop);
+
+    transportSource.setSource(readerSource.get(), 0, nullptr,
+                              reader->sampleRate, reader->numChannels);
+
+    if (currentSampleRate > 0)
+        transportSource.prepareToPlay(currentBlockSize, currentSampleRate);
+
+    currentFilePath = filePath;
+
+    DBG("SamplePlayerPlugin: Loaded from cache (WAV-in-memory) " + filePath +
+        " (duration: " + juce::String(getLengthInSeconds(), 2) + "s)");
+    return true;
 }
 
 //==============================================================================
 void SamplePlayerPlugin::play(double offsetSeconds)
 {
     juce::ScopedLock sl(lock);
-
-    // Check if we're using editable buffer mode
-    if (useEditableBuffer && sampleEditor && sampleEditor->isLoaded())
-    {
-        // For editable buffer, just set the play position and playing flag
-        double sampleRate = sampleEditor->getSampleRate();
-        editablePlayPosition = static_cast<juce::int64>(offsetSeconds * sampleRate);
-        startOffset = offsetSeconds;
-        playing = true;
-        samplesPlayedSinceStart = 0;
-        queuedToPlay = false;
-        queuedToStop = false;
-        needsStartBeatInit = true;
-
-        DBG("SamplePlayerPlugin: Playing from editable buffer at " + juce::String(offsetSeconds, 3) + "s");
-        return;
-    }
 
     if (readerSource == nullptr)
         return;
@@ -180,35 +210,15 @@ void SamplePlayerPlugin::play(double offsetSeconds)
 
 void SamplePlayerPlugin::stop()
 {
-    DBG("SamplePlayerPlugin::stop() - entering");
-
     juce::ScopedLock sl(lock);
 
-    DBG("SamplePlayerPlugin::stop() - acquired lock");
-
-    // Handle editable buffer mode
-    if (useEditableBuffer)
-    {
-        editablePlayPosition = 0;
-        playing = false;
-        queuedToPlay = false;
-        queuedToStop = false;
-        DBG("SamplePlayerPlugin: Stopped (editable buffer)");
-        return;
-    }
-
-    // Only interact with transport if we have a valid source
     if (readerSource != nullptr)
     {
-        DBG("SamplePlayerPlugin::stop() - stopping transport");
         transportSource.stop();
-        DBG("SamplePlayerPlugin::stop() - setting position");
         transportSource.setPosition(0.0);
     }
 
     playing = false;
-
-    // Clear any queued state
     queuedToPlay = false;
     queuedToStop = false;
 
@@ -270,11 +280,10 @@ bool SamplePlayerPlugin::loadFileForPendingPlay(const juce::String& filePath, do
 
     pendingFilePath = filePath;
     hasPendingFile = true;
-    hasPendingCachedBuffer = false;
     queuedToPlay = true;
     queuedToStop = false;
     queuedOffset = offsetSeconds;
-    needsImmediateStart = true;  // Force immediate start on next sync
+    // Do NOT set needsImmediateStart — let crossedBoundary detection fire at the quantize boundary
 
     DBG("SamplePlayerPlugin: Prepared pending file for seamless transition: " + filePath);
     return true;
@@ -296,28 +305,31 @@ bool SamplePlayerPlugin::loadCachedBufferForPendingPlay(const juce::String& file
         return false;
     }
 
-    // Copy the cached buffer
-    int numChannels = cachedBuffer.getNumChannels();
-    int numSamples = cachedBuffer.getNumSamples();
-    pendingCachedBuffer.setSize(numChannels, numSamples);
-    for (int ch = 0; ch < numChannels; ++ch)
+    // Release any existing pending source before touching pendingMemoryBlock
+    pendingReaderSource.reset();
+    pendingMemoryBlock.reset();
+
+    // Encode the cached buffer as 32-bit float WAV into pendingMemoryBlock
+    auto* reader = createWavReaderFromBuffer(cachedBuffer, bufferSampleRate, pendingMemoryBlock);
+    if (reader == nullptr)
     {
-        pendingCachedBuffer.copyFrom(ch, 0, cachedBuffer, ch, 0, numSamples);
+        DBG("SamplePlayerPlugin: Failed to encode pending cached buffer as WAV: " + filePath);
+        return false;
     }
 
-    // Store pending info
-    pendingFileSampleRate = bufferSampleRate;
-    pendingFileLengthSamples = numSamples;
+    pendingFileSampleRate = reader->sampleRate;
+    pendingFileLengthSamples = reader->lengthInSamples;
     pendingFilePath = filePath;
-    pendingReaderSource.reset();  // Clear file-based pending source
-    hasPendingFile = false;
-    hasPendingCachedBuffer = true;
+    pendingReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader, true);
+    pendingReaderSource->setLooping(loopEnabled && !useBeatsForLoop);
+
+    hasPendingFile = true;
     queuedToPlay = true;
     queuedToStop = false;
     queuedOffset = offsetSeconds;
-    needsImmediateStart = true;  // Force immediate start on next sync
+    // Do NOT set needsImmediateStart — let crossedBoundary detection fire at the quantize boundary
 
-    DBG("SamplePlayerPlugin: Prepared pending cached buffer for seamless transition: " + filePath);
+    DBG("SamplePlayerPlugin: Prepared pending cached buffer (WAV-in-memory) for: " + filePath);
     return true;
 }
 
@@ -372,17 +384,10 @@ void SamplePlayerPlugin::syncToTransport(double transportPositionBeats,
 {
     juce::ScopedLock sl(lock);
 
+    // Keep BPM in sync for loop-length calculations in processBlock.
     currentBpm = bpm;
 
-    // Initialize sampleStartBeat if needed (after play() was called)
-    if (needsStartBeatInit && playing)
-    {
-        sampleStartBeat = transportPositionBeats;
-        needsStartBeatInit = false;
-        DBG("SamplePlayerPlugin: Initialized sampleStartBeat to " + juce::String(sampleStartBeat, 2));
-    }
-
-    // If transport stopped, stop sample too
+    // Stop sample when transport stops.
     if (!transportPlaying)
     {
         if (playing)
@@ -395,145 +400,96 @@ void SamplePlayerPlugin::syncToTransport(double transportPositionBeats,
         return;
     }
 
-    // Calculate quantization boundary
-    // quantizeSteps is in 1/16th notes, convert to beats (quarter notes)
-    double beatsPerQuantize = quantizeSteps / 4.0;
+    // --- Legacy boundary detection for SCENE MODE (queueSampleFile path) ---
+    // Live-mode clips use targetStartSample / targetStopSample set from MidiBridge
+    // and are triggered sample-accurately in processBlock().  We only run the
+    // boundary check here when those atomics are NOT armed, so scene-mode clips
+    // (which don't set targetStartSample) still work correctly.
 
-    // Check if we've crossed a quantization boundary
+    double beatsPerQuantize = quantizeSteps / 4.0;
     int prevQuantize = (int)(lastTransportBeat / beatsPerQuantize);
     int currQuantize = (int)(transportPositionBeats / beatsPerQuantize);
     bool crossedBoundary = currQuantize > prevQuantize;
 
-    // Handle queued actions at quantization boundaries OR if immediate start is needed
-    // needsImmediateStart is set when first clip is queued in Live Mode
     if (crossedBoundary || needsImmediateStart)
     {
-        DBG("SamplePlayerPlugin::syncToTransport - Triggering queued action: crossedBoundary=" +
-            juce::String(crossedBoundary ? "true" : "false") +
-            " needsImmediateStart=" + juce::String(needsImmediateStart ? "true" : "false") +
-            " queuedToPlay=" + juce::String(queuedToPlay ? "true" : "false") +
-            " hasPendingCachedBuffer=" + juce::String(hasPendingCachedBuffer ? "true" : "false") +
-            " hasPendingFile=" + juce::String(hasPendingFile ? "true" : "false") +
-            " readerSource=" + juce::String(readerSource != nullptr ? "valid" : "null"));
-        // Handle pending cached buffer switch for seamless Live Mode transitions (from cache)
-        if (queuedToPlay && hasPendingCachedBuffer && pendingCachedBuffer.getNumSamples() > 0)
+        // Live-mode path: audio thread handles it — don't steal the trigger.
+        bool livePathArmed = (targetStartSample.load(std::memory_order_relaxed) >= 0);
+
+        if (!livePathArmed)
         {
-            // Stop current playback
-            transportSource.stop();
-            transportSource.setSource(nullptr);
-            readerSource.reset();
-
-            // Load cached buffer into sample editor for in-memory playback
-            if (!sampleEditor)
-                sampleEditor = std::make_unique<SampleEditor>();
-
-            sampleEditor->loadFromBuffer(pendingCachedBuffer, pendingFileSampleRate);
-
-            // Update state
-            currentFilePath = pendingFilePath;
-            fileSampleRate = pendingFileSampleRate;
-            fileLengthSamples = pendingFileLengthSamples;
-            useEditableBuffer = true;
-            editablePlayPosition = static_cast<juce::int64>(queuedOffset * pendingFileSampleRate);
-
-            // Clear pending state
-            hasPendingCachedBuffer = false;
-            pendingCachedBuffer.setSize(0, 0);
-            pendingFilePath = {};
-            pendingFileSampleRate = 0.0;
-            pendingFileLengthSamples = 0;
-
-            // Start playback at the quantization boundary
-            sampleStartBeat = currQuantize * beatsPerQuantize;
-            startOffset = queuedOffset;
-            playing = true;
-            samplesPlayedSinceStart = 0;
-            queuedToPlay = false;
-            needsImmediateStart = false;
-
-            DBG("SamplePlayerPlugin: Seamless switch to cached buffer at beat " + juce::String(sampleStartBeat, 2));
-        }
-        // Handle pending file switch for seamless Live Mode transitions (from disk)
-        else if (queuedToPlay && hasPendingFile && pendingReaderSource != nullptr)
-        {
-            // Stop current playback but keep audio flowing until switch
-            transportSource.stop();
-            transportSource.setSource(nullptr);
-            readerSource.reset();
-
-            // Switch to pending file
-            readerSource = std::move(pendingReaderSource);
-            currentFilePath = pendingFilePath;
-            fileSampleRate = pendingFileSampleRate;
-            fileLengthSamples = pendingFileLengthSamples;
-            useEditableBuffer = false;
-
-            // Connect to transport source
-            if (auto* reader = readerSource->getAudioFormatReader())
+            // Seamless pending-file switch (scene mode / non-live fallback).
+            if (queuedToPlay && hasPendingFile && pendingReaderSource != nullptr)
             {
-                transportSource.setSource(readerSource.get(), 0, nullptr,
-                                          reader->sampleRate, reader->numChannels);
+                transportSource.stop();
+                transportSource.setSource(nullptr);
+                readerSource.reset();
+                cachedMemoryBlock.reset();
 
-                if (currentSampleRate > 0)
+                cachedMemoryBlock = std::move(pendingMemoryBlock);
+                readerSource      = std::move(pendingReaderSource);
+                currentFilePath   = pendingFilePath;
+                fileSampleRate    = pendingFileSampleRate;
+                fileLengthSamples = pendingFileLengthSamples;
+
+                hasPendingFile        = false;
+                pendingFilePath       = {};
+                pendingFileSampleRate = 0.0;
+                pendingFileLengthSamples = 0;
+
+                if (auto* reader = readerSource->getAudioFormatReader())
                 {
-                    transportSource.prepareToPlay(currentBlockSize, currentSampleRate);
+                    transportSource.setSource(readerSource.get(), 0, nullptr,
+                                              reader->sampleRate, reader->numChannels);
+                    if (currentSampleRate > 0)
+                        transportSource.prepareToPlay(currentBlockSize, currentSampleRate);
                 }
+
+                sampleStartBeat = currQuantize * beatsPerQuantize;
+                transportSource.setPosition(queuedOffset);
+                transportSource.start();
+                playing = true;
+                samplesPlayedSinceStart = 0;
+                queuedToPlay = false;
+                needsImmediateStart = false;
+
+                DBG("SamplePlayerPlugin: Seamless switch (scene) at beat " +
+                    juce::String(sampleStartBeat, 2));
             }
+            else if (queuedToPlay && readerSource != nullptr)
+            {
+                sampleStartBeat = currQuantize * beatsPerQuantize;
+                transportSource.setPosition(queuedOffset);
+                transportSource.start();
+                playing = true;
+                queuedToPlay = false;
+                needsImmediateStart = false;
 
-            // Clear pending state
-            hasPendingFile = false;
-            pendingFilePath = {};
-            pendingFileSampleRate = 0.0;
-            pendingFileLengthSamples = 0;
-
-            // Start playback at the quantization boundary
-            sampleStartBeat = currQuantize * beatsPerQuantize;
-            transportSource.setPosition(queuedOffset);
-            transportSource.start();
-            playing = true;
-            samplesPlayedSinceStart = 0;
-            queuedToPlay = false;
-            needsImmediateStart = false;
-
-            DBG("SamplePlayerPlugin: Seamless switch to new file at beat " + juce::String(sampleStartBeat, 2));
-        }
-        else if (queuedToPlay && readerSource != nullptr)
-        {
-            // Normal queuedPlay without file switch
-            sampleStartBeat = currQuantize * beatsPerQuantize;  // Exact boundary position
-            transportSource.setPosition(queuedOffset);
-            transportSource.start();
-            playing = true;
-            queuedToPlay = false;
-            needsImmediateStart = false;
-
-            DBG("SamplePlayerPlugin: Started at beat " + juce::String(sampleStartBeat, 2) +
-                " (quantize boundary " + juce::String(currQuantize) + ")");
+                DBG("SamplePlayerPlugin: Started (scene) at beat " +
+                    juce::String(sampleStartBeat, 2));
+            }
         }
 
-        if (queuedToStop && playing)
+        // Queued stop: also skip if live-mode stop path is armed.
+        bool liveStopArmed = (targetStopSample.load(std::memory_order_relaxed) >= 0);
+        if (queuedToStop && !liveStopArmed)
         {
-            transportSource.stop();
-            transportSource.setPosition(0.0);
-            playing = false;
+            if (playing)
+            {
+                transportSource.stop();
+                transportSource.setPosition(0.0);
+                playing = false;
+            }
             queuedToStop = false;
             needsImmediateStart = false;
 
-            DBG("SamplePlayerPlugin: Stopped at beat " + juce::String(transportPositionBeats, 2));
+            DBG("SamplePlayerPlugin: Stopped (scene) at beat " +
+                juce::String(transportPositionBeats, 2));
         }
 
-        // Reset immediate start flag if it was set but no action was taken
-        // (e.g., if queuedToPlay was true but no buffer/file was ready)
         if (needsImmediateStart && !queuedToPlay && !queuedToStop)
-        {
             needsImmediateStart = false;
-        }
     }
-
-    // NOTE: Beat-synced looping removed from syncToTransport.
-    // All looping is now handled exclusively in processBlock/processFromEditableBuffer
-    // for sample-accurate timing. Having dual looping logic caused samplesPlayedSinceStart
-    // counter corruption (syncToTransport resetting it while processBlock was tracking it).
 
     lastTransportBeat = transportPositionBeats;
 }
@@ -543,12 +499,6 @@ void SamplePlayerPlugin::syncToTransport(double transportPositionBeats,
 
 double SamplePlayerPlugin::getLengthInSeconds() const
 {
-    // Check editable buffer first
-    if (useEditableBuffer && sampleEditor && sampleEditor->isLoaded())
-    {
-        return sampleEditor->getDurationSeconds();
-    }
-
     if (fileSampleRate > 0 && fileLengthSamples > 0)
         return (double)fileLengthSamples / fileSampleRate;
     return 0.0;
@@ -556,58 +506,43 @@ double SamplePlayerPlugin::getLengthInSeconds() const
 
 bool SamplePlayerPlugin::hasValidSource() const
 {
-    // Check if we have a valid editable buffer
-    if (useEditableBuffer && sampleEditor && sampleEditor->isLoaded())
-    {
-        return true;
-    }
-
-    // Check if we have a valid reader source
-    if (readerSource != nullptr)
-    {
-        return true;
-    }
-
-    return false;
+    return readerSource != nullptr;
 }
 
 void SamplePlayerPlugin::resetForLiveMode()
 {
     juce::ScopedLock sl(lock);
 
-    // Stop any current playback
     playing = false;
     transportSource.stop();
     transportSource.setSource(nullptr);
     readerSource.reset();
+    cachedMemoryBlock.reset();
 
-    // Clear editable buffer mode
-    useEditableBuffer = false;
-    editablePlayPosition = 0;
-
-    // Reset file info so that the next play will load fresh
     currentFilePath = {};
     fileSampleRate = 0.0;
     fileLengthSamples = 0;
 
-    // Clear any queued state
     queuedToPlay = false;
     queuedToStop = false;
     needsImmediateStart = false;
 
-    // Clear pending state
     hasPendingFile = false;
-    hasPendingCachedBuffer = false;
     pendingReaderSource.reset();
-    pendingCachedBuffer.setSize(0, 0);
+    pendingMemoryBlock.reset();
     pendingFilePath = {};
     pendingFileSampleRate = 0.0;
     pendingFileLengthSamples = 0;
 
-    // Reset transport tracking
     lastTransportBeat = 0.0;
     sampleStartBeat = 0.0;
     samplesPlayedSinceStart = 0;
+
+    // Clear audio-thread trigger targets.
+    // cumulativeSamplePosition is NOT reset here; it is set externally via
+    // setCumulativePosition() to match the MidiClipScheduler's counter.
+    targetStartSample.store(-1, std::memory_order_relaxed);
+    targetStopSample.store(-1,  std::memory_order_relaxed);
 
     DBG("SamplePlayerPlugin: Reset for Live Mode");
 }
@@ -624,6 +559,25 @@ void SamplePlayerPlugin::setPositionSeconds(double position)
 }
 
 //==============================================================================
+// Audio-thread quantize triggering
+
+void SamplePlayerPlugin::setCumulativePosition(int64_t pos)
+{
+    juce::ScopedLock sl(lock);
+    cumulativeSamplePosition = pos;
+}
+
+void SamplePlayerPlugin::setTargetStartSample(int64_t samplePos)
+{
+    targetStartSample.store(samplePos, std::memory_order_relaxed);
+}
+
+void SamplePlayerPlugin::setTargetStopSample(int64_t samplePos)
+{
+    targetStopSample.store(samplePos, std::memory_order_relaxed);
+}
+
+//==============================================================================
 // AudioProcessor Implementation
 
 void SamplePlayerPlugin::prepareToPlay(double sampleRate, int samplesPerBlock)
@@ -634,6 +588,10 @@ void SamplePlayerPlugin::prepareToPlay(double sampleRate, int samplesPerBlock)
     currentBlockSize = samplesPerBlock;
 
     transportSource.prepareToPlay(samplesPerBlock, sampleRate);
+
+    // Reset the position counter.  All nodes in the graph get prepareToPlay
+    // simultaneously, so starting at 0 keeps them synchronised.
+    cumulativeSamplePosition = 0;
 }
 
 void SamplePlayerPlugin::releaseResources()
@@ -645,27 +603,144 @@ void SamplePlayerPlugin::releaseResources()
 void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
                                        juce::MidiBuffer& /*midiMessages*/)
 {
+    // Snapshot the cumulative position BEFORE acquiring the lock so the
+    // atomic target comparisons use the same value that we use below.
+    const int64_t blockStart = cumulativeSamplePosition;
+
     juce::ScopedLock sl(lock);
 
-    // Clear buffer first
     buffer.clear();
 
-    if (!playing)
-        return;
+    const int numSamples = buffer.getNumSamples();
 
-    // Use editable buffer if active
-    if (useEditableBuffer && sampleEditor && sampleEditor->isLoaded())
+    // =========================================================================
+    // Audio-thread quantize STOP
+    // =========================================================================
     {
-        processFromEditableBuffer(buffer, buffer.getNumSamples());
+        int64_t tStop = targetStopSample.load(std::memory_order_relaxed);
+        if (tStop >= 0 && playing)
+        {
+            // Is the stop boundary in this block (or already past)?
+            if (tStop <= blockStart + numSamples)
+            {
+                // How many samples of audio do we still owe before the stop?
+                int stopOffset = (int)std::max(int64_t(0), tStop - blockStart);
+                stopOffset = std::min(stopOffset, numSamples);
+
+                if (stopOffset > 0 && readerSource != nullptr)
+                {
+                    juce::AudioSourceChannelInfo info(&buffer, 0, stopOffset);
+                    transportSource.getNextAudioBlock(info);
+                    samplesPlayedSinceStart += stopOffset;
+                }
+
+                transportSource.stop();
+                transportSource.setPosition(0.0);
+                playing     = false;
+                queuedToStop = false;
+                targetStopSample.store(-1, std::memory_order_relaxed);
+
+                // Buffer already cleared; samples 0..stopOffset filled,
+                // stopOffset..numSamples are silent.
+                cumulativeSamplePosition += numSamples;
+                return;
+            }
+        }
+    }
+
+    // =========================================================================
+    // Audio-thread quantize START  (Live Mode seamless triggering)
+    // =========================================================================
+    {
+        int64_t tStart = targetStartSample.load(std::memory_order_relaxed);
+        if (tStart >= 0 && tStart <= blockStart + numSamples)
+        {
+            // The boundary falls in this block (or is already past — catch-up).
+            int triggerOffset = (int)std::max(int64_t(0), tStart - blockStart);
+            triggerOffset = std::min(triggerOffset, numSamples - 1);
+
+            // --- Seamless switch: if we have a pending reader, play the old
+            //     source up to the trigger point then atomically switch. ---
+            if (hasPendingFile && pendingReaderSource != nullptr)
+            {
+                // Fill pre-trigger samples from the currently-playing source.
+                if (triggerOffset > 0 && playing && readerSource != nullptr)
+                {
+                    juce::AudioSourceChannelInfo oldInfo(&buffer, 0, triggerOffset);
+                    transportSource.getNextAudioBlock(oldInfo);
+                    samplesPlayedSinceStart += triggerOffset;
+                }
+
+                // Release old reader before touching cachedMemoryBlock.
+                transportSource.stop();
+                transportSource.setSource(nullptr);
+                readerSource.reset();
+                cachedMemoryBlock.reset();
+
+                // Promote pending source.
+                cachedMemoryBlock      = std::move(pendingMemoryBlock);
+                readerSource           = std::move(pendingReaderSource);
+                currentFilePath        = pendingFilePath;
+                fileSampleRate         = pendingFileSampleRate;
+                fileLengthSamples      = pendingFileLengthSamples;
+
+                hasPendingFile         = false;
+                pendingFilePath        = {};
+                pendingFileSampleRate  = 0.0;
+                pendingFileLengthSamples = 0;
+
+                if (auto* reader = readerSource->getAudioFormatReader())
+                {
+                    transportSource.setSource(readerSource.get(), 0, nullptr,
+                                              reader->sampleRate, reader->numChannels);
+                    if (currentSampleRate > 0)
+                        transportSource.prepareToPlay(currentBlockSize, currentSampleRate);
+                }
+            }
+            else if (triggerOffset > 0 && playing && readerSource != nullptr)
+            {
+                // Same file re-trigger: fill pre-trigger samples from old position.
+                juce::AudioSourceChannelInfo oldInfo(&buffer, 0, triggerOffset);
+                transportSource.getNextAudioBlock(oldInfo);
+            }
+
+            // Start the new (or re-started) source at the trigger offset.
+            if (readerSource != nullptr)
+            {
+                transportSource.setPosition(queuedOffset);
+                transportSource.start();
+                playing              = true;
+                samplesPlayedSinceStart = 0;
+                queuedToPlay         = false;
+                needsImmediateStart  = false;
+
+                // Fill post-trigger samples from the new source.
+                int postSamples = numSamples - triggerOffset;
+                if (postSamples > 0)
+                {
+                    juce::AudioSourceChannelInfo newInfo(&buffer, triggerOffset, postSamples);
+                    transportSource.getNextAudioBlock(newInfo);
+                    samplesPlayedSinceStart += postSamples;
+                }
+            }
+
+            targetStartSample.store(-1, std::memory_order_relaxed);
+            cumulativeSamplePosition += numSamples;
+            return;
+        }
+    }
+
+    // =========================================================================
+    // Normal playback (scene mode / already-running clips)
+    // =========================================================================
+
+    if (!playing || readerSource == nullptr)
+    {
+        cumulativeSamplePosition += numSamples;
         return;
     }
 
-    if (readerSource == nullptr)
-        return;
-
-    int numSamples = buffer.getNumSamples();
-
-    // Calculate loop length in samples if using beat-based looping
+    // Calculate loop length in samples if using beat-based looping.
     if (loopEnabled && useBeatsForLoop && currentBpm > 0 && currentSampleRate > 0)
     {
         double secondsPerBeat = 60.0 / currentBpm;
@@ -673,14 +748,13 @@ void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
         loopLengthSamples = static_cast<juce::int64>(loopLengthSeconds * currentSampleRate);
     }
 
-    // Check if we need to loop based on samples played (sample-accurate looping)
+    // Sample-accurate looping.
     if (loopEnabled && useBeatsForLoop && loopLengthSamples > 0)
     {
         juce::int64 samplesRemainingInLoop = loopLengthSamples - samplesPlayedSinceStart;
 
         if (samplesRemainingInLoop <= 0)
         {
-            // Time to loop - reset position
             transportSource.setPosition(startOffset);
             if (!transportSource.isPlaying())
                 transportSource.start();
@@ -689,20 +763,15 @@ void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
         }
         else if (samplesRemainingInLoop < numSamples)
         {
-            // Loop point is within this buffer - need to handle partial playback
-            // Play remaining samples, then loop
             int samplesToPlay = static_cast<int>(samplesRemainingInLoop);
 
-            // Get audio up to loop point
             juce::AudioSourceChannelInfo partialInfo(&buffer, 0, samplesToPlay);
             transportSource.getNextAudioBlock(partialInfo);
 
-            // Reset for loop
             transportSource.setPosition(startOffset);
             if (!transportSource.isPlaying())
                 transportSource.start();
 
-            // Get remaining audio from start of sample
             int remainingSamples = numSamples - samplesToPlay;
             if (remainingSamples > 0)
             {
@@ -711,25 +780,23 @@ void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
             }
 
             samplesPlayedSinceStart = remainingSamples;
+            cumulativeSamplePosition += numSamples;
             DBG("SamplePlayerPlugin: Sample-accurate loop (partial buffer)");
             return;
         }
     }
 
-    // Get audio from transport source
-    // Note: Mixer controls (volume, pan, mute, solo) are handled by TrackMixerPlugin
     juce::AudioSourceChannelInfo info(&buffer, 0, numSamples);
     transportSource.getNextAudioBlock(info);
-
-    // Track samples played for loop timing
     samplesPlayedSinceStart += numSamples;
 
-    // Check if playback has naturally ended (for non-looping mode)
     if (!loopEnabled && !transportSource.isPlaying())
     {
         playing = false;
         DBG("SamplePlayerPlugin: Playback ended naturally");
     }
+
+    cumulativeSamplePosition += numSamples;
 }
 
 //==============================================================================
@@ -771,52 +838,30 @@ bool SamplePlayerPlugin::loadFileForEditing(const juce::String& filePath)
     juce::File file(filePath);
 
     // Resample to device sample rate for consistent playback timing
-    // currentSampleRate is set in prepareToPlay()
     double targetRate = currentSampleRate > 0 ? currentSampleRate : 48000.0;
 
     bool success = sampleEditor->loadFromFile(file, targetRate);
 
     if (success)
     {
-        currentFilePath = filePath;
-        fileSampleRate = sampleEditor->getSampleRate();  // Will now be targetRate
-        fileLengthSamples = static_cast<juce::int64>(sampleEditor->getNumSamples());
-        useEditableBuffer = true;
-        editablePlayPosition = 0;
-
         DBG("SamplePlayerPlugin: Loaded for editing (resampled to " +
-            juce::String(fileSampleRate) + " Hz): " + filePath);
+            juce::String(targetRate) + " Hz): " + filePath);
     }
     else
     {
         DBG("SamplePlayerPlugin: Failed to load for editing: " + filePath);
     }
 
+    // Also load the file for playback via transportSource.
+    // Playback is always file-based; edits flush to disk then reload.
+    loadFile(filePath);
+
     return success;
-}
-
-void SamplePlayerPlugin::applyEdits()
-{
-    juce::ScopedLock sl(lock);
-
-    if (!sampleEditor || !sampleEditor->isLoaded())
-        return;
-
-    useEditableBuffer = true;
-
-    // Update file info from edited buffer
-    fileSampleRate = sampleEditor->getSampleRate();
-    fileLengthSamples = static_cast<juce::int64>(sampleEditor->getNumSamples());
-
-    DBG("SamplePlayerPlugin: Applied edits, using editable buffer");
 }
 
 void SamplePlayerPlugin::discardEdits()
 {
     juce::ScopedLock sl(lock);
-
-    useEditableBuffer = false;
-    editablePlayPosition = 0;
 
     if (sampleEditor)
         sampleEditor->clear();
@@ -834,158 +879,18 @@ void SamplePlayerPlugin::discardEdits()
     DBG("SamplePlayerPlugin: Discarded edits");
 }
 
-void SamplePlayerPlugin::reloadFromEditedBuffer()
+void SamplePlayerPlugin::releaseFileHandle()
 {
     juce::ScopedLock sl(lock);
 
-    if (!sampleEditor || !sampleEditor->isLoaded())
-        return;
+    // Stop playback and release the file reader so the file can be overwritten.
+    // Does NOT touch sampleEditor — the in-memory buffer is preserved.
+    playing = false;
+    transportSource.stop();
+    transportSource.setSource(nullptr);
+    readerSource.reset();
+    cachedMemoryBlock.reset();
 
-    // Update file info from edited buffer
-    fileSampleRate = sampleEditor->getSampleRate();
-    fileLengthSamples = static_cast<juce::int64>(sampleEditor->getNumSamples());
-
-    DBG("SamplePlayerPlugin: Reloaded from edited buffer");
+    DBG("SamplePlayerPlugin: Released file handle");
 }
 
-//==============================================================================
-// Process audio from editable buffer
-
-void SamplePlayerPlugin::processFromEditableBuffer(juce::AudioBuffer<float>& buffer, int numSamples)
-{
-    if (!sampleEditor || !sampleEditor->isLoaded())
-        return;
-
-    SampleBuffer* sampleBuffer = sampleEditor->getBuffer();
-    if (!sampleBuffer)
-        return;
-
-    int totalSamples = sampleBuffer->getNumSamples();
-    if (totalSamples == 0)
-        return;
-
-    // Get the sample buffer's sample rate (may differ from device rate)
-    double bufferSampleRate = sampleBuffer->getSampleRate();
-    if (bufferSampleRate <= 0)
-        bufferSampleRate = currentSampleRate;
-
-    // Calculate loop length in samples if using beat-based looping
-    // Use the DEVICE sample rate, because samplesPlayedSinceStart advances at device rate
-    // (each processBlock call increments by numSamples which is in device-rate samples)
-    if (loopEnabled && useBeatsForLoop && currentBpm > 0 && currentSampleRate > 0)
-    {
-        double secondsPerBeat = 60.0 / currentBpm;
-        double loopLengthSeconds = loopLengthBeats * secondsPerBeat;
-        loopLengthSamples = static_cast<juce::int64>(loopLengthSeconds * currentSampleRate);
-    }
-
-    // Handle playback offset
-    double playbackOffset = sampleBuffer->getPlaybackOffset();
-    juce::int64 offsetSamples = static_cast<juce::int64>(playbackOffset * bufferSampleRate);
-
-    int samplesRemaining = numSamples;
-    int destOffset = 0;
-
-    while (samplesRemaining > 0)
-    {
-        // Calculate effective position with offset
-        juce::int64 effectivePos = editablePlayPosition - offsetSamples;
-
-        // Check for loop point
-        if (loopEnabled && useBeatsForLoop && loopLengthSamples > 0)
-        {
-            juce::int64 samplesRemainingInLoop = loopLengthSamples - samplesPlayedSinceStart;
-
-            if (samplesRemainingInLoop <= 0)
-            {
-                // Reset for loop
-                editablePlayPosition = static_cast<juce::int64>(startOffset * bufferSampleRate);
-                samplesPlayedSinceStart = 0;
-                effectivePos = editablePlayPosition - offsetSamples;
-            }
-            else if (samplesRemainingInLoop < samplesRemaining)
-            {
-                // Partial loop - copy what we can, then loop
-                int samplesToCopy = static_cast<int>(samplesRemainingInLoop);
-
-                if (effectivePos >= 0 && effectivePos < totalSamples)
-                {
-                    int available = juce::jmin(samplesToCopy, totalSamples - static_cast<int>(effectivePos));
-                    sampleBuffer->copyToBuffer(buffer, destOffset, static_cast<int>(effectivePos), available);
-                }
-
-                editablePlayPosition += samplesToCopy;
-                samplesPlayedSinceStart += samplesToCopy;
-                destOffset += samplesToCopy;
-                samplesRemaining -= samplesToCopy;
-
-                // Reset for loop
-                editablePlayPosition = static_cast<juce::int64>(startOffset * bufferSampleRate);
-                samplesPlayedSinceStart = 0;
-                continue;
-            }
-        }
-
-        // Copy samples from buffer
-        if (effectivePos >= 0 && effectivePos < totalSamples)
-        {
-            int available = juce::jmin(samplesRemaining, totalSamples - static_cast<int>(effectivePos));
-            sampleBuffer->copyToBuffer(buffer, destOffset, static_cast<int>(effectivePos), available);
-            destOffset += available;
-            editablePlayPosition += available;
-            samplesPlayedSinceStart += available;
-            samplesRemaining -= available;
-
-            // If we've reached the end and not looping, stop
-            if (effectivePos + available >= totalSamples && !loopEnabled)
-            {
-                playing = false;
-                break;
-            }
-        }
-        else if (effectivePos < 0)
-        {
-            // Before sample start - output silence and advance
-            int silenceSamples = juce::jmin(samplesRemaining, static_cast<int>(-effectivePos));
-            destOffset += silenceSamples;
-            editablePlayPosition += silenceSamples;
-            samplesPlayedSinceStart += silenceSamples;
-            samplesRemaining -= silenceSamples;
-        }
-        else
-        {
-            // Past sample end
-            if (loopEnabled && useBeatsForLoop && loopLengthSamples > 0)
-            {
-                // Beat-based loop: pad with silence until loop point
-                juce::int64 samplesUntilLoop = loopLengthSamples - samplesPlayedSinceStart;
-                if (samplesUntilLoop > 0)
-                {
-                    // Output silence and advance counters
-                    int silenceSamples = juce::jmin(samplesRemaining, static_cast<int>(samplesUntilLoop));
-                    destOffset += silenceSamples;
-                    editablePlayPosition += silenceSamples;
-                    samplesPlayedSinceStart += silenceSamples;
-                    samplesRemaining -= silenceSamples;
-                }
-                else
-                {
-                    // Loop point reached, reset to start
-                    editablePlayPosition = static_cast<juce::int64>(startOffset * bufferSampleRate);
-                    samplesPlayedSinceStart = 0;
-                }
-            }
-            else if (loopEnabled)
-            {
-                // Time-based loop: restart immediately (original behavior)
-                editablePlayPosition = static_cast<juce::int64>(startOffset * bufferSampleRate);
-                samplesPlayedSinceStart = 0;
-            }
-            else
-            {
-                playing = false;
-                break;
-            }
-        }
-    }
-}

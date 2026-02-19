@@ -41,6 +41,24 @@ bool SampleEditorBridge::loadForEditing(int trackIndex, const juce::String& file
         return false;
     }
 
+    // If the editor already has this file loaded, skip reloading.
+    // This preserves in-memory edits (e.g., stretch) that were flushed to disk.
+    // Reloading from disk is unnecessary and could lose edits if the flush
+    // hasn't fully completed or the file system is delayed.
+    SampleEditor* existingEditor = player->getSampleEditor();
+    if (existingEditor != nullptr && existingEditor->isLoaded())
+    {
+        juce::File existingFile(existingEditor->getFilePath());
+        juce::File requestedFile(filePath);
+        if (existingFile == requestedFile)
+        {
+            DBG("SampleEditorBridge: Editor already loaded for track " +
+                juce::String(trackIndex) + ", skipping reload: " + filePath);
+            trackFilePaths[trackIndex] = filePath;
+            return true;
+        }
+    }
+
     bool success = player->loadFileForEditing(filePath);
 
     if (success)
@@ -66,13 +84,11 @@ void SampleEditorBridge::timeStretch(int trackIndex, double ratio, double target
 
     editor->timeStretch(ratio, targetLengthSeconds);
 
-    // Update the player to use the edited buffer
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Time stretched track " + juce::String(trackIndex) +
         " by " + juce::String(ratio, 3) + " (target: " + juce::String(targetLengthSeconds, 3) + "s)");
@@ -86,13 +102,11 @@ void SampleEditorBridge::applyWarp(int trackIndex, double sampleBPM, double targ
 
     editor->applyWarp(sampleBPM, targetBPM, targetLengthSeconds);
 
-    // Update the player to use the edited buffer
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Warped track " + juce::String(trackIndex) +
         " from " + juce::String(sampleBPM, 1) + " to " + juce::String(targetBPM, 1) + " BPM" +
@@ -160,13 +174,11 @@ void SampleEditorBridge::fadeIn(int trackIndex, double startSeconds, double endS
 
     editor->fadeIn(startSeconds, endSeconds);
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Fade in on track " + juce::String(trackIndex) +
         " from " + juce::String(startSeconds, 3) + "s to " + juce::String(endSeconds, 3) + "s");
@@ -180,13 +192,11 @@ void SampleEditorBridge::fadeOut(int trackIndex, double startSeconds, double end
 
     editor->fadeOut(startSeconds, endSeconds);
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Fade out on track " + juce::String(trackIndex) +
         " from " + juce::String(startSeconds, 3) + "s to " + juce::String(endSeconds, 3) + "s");
@@ -203,13 +213,11 @@ void SampleEditorBridge::silence(int trackIndex, double startSeconds, double end
 
     editor->silence(startSeconds, endSeconds);
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Silenced track " + juce::String(trackIndex) +
         " from " + juce::String(startSeconds, 3) + "s to " + juce::String(endSeconds, 3) + "s");
@@ -223,13 +231,11 @@ void SampleEditorBridge::trim(int trackIndex, double startSeconds, double endSec
 
     editor->trim(startSeconds, endSeconds);
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Trimmed track " + juce::String(trackIndex) +
         " to " + juce::String(startSeconds, 3) + "s - " + juce::String(endSeconds, 3) + "s");
@@ -243,13 +249,11 @@ void SampleEditorBridge::deleteRange(int trackIndex, double startSeconds, double
 
     editor->deleteRange(startSeconds, endSeconds);
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Deleted range from track " + juce::String(trackIndex) +
         " from " + juce::String(startSeconds, 3) + "s to " + juce::String(endSeconds, 3) + "s");
@@ -277,13 +281,11 @@ void SampleEditorBridge::cutRange(int trackIndex, double startSeconds, double en
     editor->copyRange(startSeconds, endSeconds);
     editor->deleteRange(startSeconds, endSeconds);
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Cut range from track " + juce::String(trackIndex) +
         " from " + juce::String(startSeconds, 3) + "s to " + juce::String(endSeconds, 3) + "s");
@@ -303,13 +305,11 @@ void SampleEditorBridge::paste(int trackIndex, double positionSeconds)
 
     editor->insertClipboard(positionSeconds);
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Pasted at track " + juce::String(trackIndex) +
         " position " + juce::String(positionSeconds, 3) + "s");
@@ -335,13 +335,11 @@ void SampleEditorBridge::reset(int trackIndex)
 
     editor->reset();
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform was reset to original
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Reset track " + juce::String(trackIndex));
 }
@@ -354,13 +352,11 @@ void SampleEditorBridge::undo(int trackIndex)
 
     editor->undo();
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Undo on track " + juce::String(trackIndex));
 }
@@ -373,13 +369,11 @@ void SampleEditorBridge::redo(int trackIndex)
 
     editor->redo();
 
-    // Update the player
-    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-    if (player)
-        player->reloadFromEditedBuffer();
-
     // Invalidate peaks cache since waveform changed
     invalidatePeaksCache(trackIndex);
+
+    // Flush to disk and reload player from file
+    flushTrackToDisk(trackIndex);
 
     DBG("SampleEditorBridge: Redo on track " + juce::String(trackIndex));
 }
@@ -427,6 +421,79 @@ bool SampleEditorBridge::saveToFile(int trackIndex, const juce::String& filePath
     return success;
 }
 
+void SampleEditorBridge::flushAllEditsToDisk()
+{
+    DBG("SampleEditorBridge::flushAllEditsToDisk - checking all tracks");
+
+    int flushedCount = 0;
+
+    auto trackIndices = samplePlayerManager.getTrackIndices();
+    for (int trackIndex : trackIndices)
+    {
+        juce::String savedPath = flushTrackToDisk(trackIndex);
+        if (savedPath.isNotEmpty())
+        {
+            invalidatePeaksCache(trackIndex);
+            flushedCount++;
+        }
+    }
+
+    DBG("SampleEditorBridge::flushAllEditsToDisk - flushed " +
+        juce::String(flushedCount) + " tracks");
+}
+
+juce::String SampleEditorBridge::flushTrackToDisk(int trackIndex)
+{
+    SamplePlayerPlugin* player = samplePlayerManager.getPlayerForTrack(trackIndex);
+    if (player == nullptr)
+        return {};
+
+    SampleEditor* editor = player->getSampleEditor();
+    if (editor == nullptr || !editor->isLoaded())
+        return {};
+
+    juce::String filePath = editor->getFilePath();
+    if (filePath.isEmpty())
+        return {};
+
+    // Save directly to the project copy. The original lives in the Samples Library
+    // folder (stored as originalSourcePath in JS) and can be restored from there.
+    juce::File saveFile(filePath);
+
+    // saveToFile writes WAV format — if original was non-WAV, use .wav extension
+    if (!saveFile.getFileExtension().equalsIgnoreCase(".wav"))
+        saveFile = saveFile.withFileExtension("wav");
+
+    // Release the file handle (readerSource/transportSource) so we can
+    // overwrite the file on Windows. This does NOT clear the sampleEditor buffer.
+    player->releaseFileHandle();
+
+    bool saved = editor->saveToFile(saveFile);
+    if (!saved)
+    {
+        DBG("SampleEditorBridge::flushTrackToDisk - FAILED to save track " +
+            juce::String(trackIndex) + " to " + saveFile.getFullPathName());
+        return {};
+    }
+
+    juce::String savePath = saveFile.getFullPathName();
+
+    // Update stored paths if extension changed
+    if (savePath != filePath)
+    {
+        editor->setFilePath(savePath);
+        trackFilePaths[trackIndex] = savePath;
+    }
+
+    // Reload from disk so player switches to file-based mode
+    player->loadFile(savePath);
+
+    DBG("SampleEditorBridge::flushTrackToDisk - flushed track " +
+        juce::String(trackIndex) + " to " + savePath);
+
+    return savePath;
+}
+
 //==============================================================================
 // Query
 
@@ -436,7 +503,8 @@ bool SampleEditorBridge::isLoadedForEditing(int trackIndex)
     if (player == nullptr)
         return false;
 
-    return player->isUsingEditableBuffer();
+    SampleEditor* editor = player->getSampleEditor();
+    return editor != nullptr && editor->isLoaded();
 }
 
 double SampleEditorBridge::getDuration(int trackIndex)

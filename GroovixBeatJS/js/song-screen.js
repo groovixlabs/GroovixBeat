@@ -224,6 +224,22 @@ const SongScreen = {
         this.canvasWidth = width;
         this.canvasHeight = height;
 
+        // Create or resize the playhead overlay canvas.
+        // It sits on top of the main canvas (pointer-events: none) and is the only
+        // thing redrawn every animation frame — the main canvas only redraws on state changes.
+        if (!this.playheadCanvas) {
+            this.playheadCanvas = document.createElement('canvas');
+            this.playheadCanvas.id = 'clipPlayheadCanvas';
+            this.playheadCanvas.style.cssText =
+                'position:absolute;top:0;left:0;pointer-events:none;border-radius:4px;';
+            this.canvas.parentElement.appendChild(this.playheadCanvas);
+            this.playheadCtx = this.playheadCanvas.getContext('2d');
+        }
+        this.playheadCanvas.width = width * dpr;
+        this.playheadCanvas.height = height * dpr;
+        this.playheadCanvas.style.width = width + 'px';
+        this.playheadCanvas.style.height = height + 'px';
+
         // Attach event listeners
         this.attachCanvasEvents();
     },
@@ -372,7 +388,7 @@ const SongScreen = {
         }
     },
 
-    // Render the entire canvas
+    // Render the entire canvas (static content — no playheads)
     renderCanvas: function() {
         if (!this.ctx) return;
 
@@ -394,6 +410,102 @@ const SongScreen = {
         // Draw drag overlay if dragging over a cell
         if (this.dragOverCell) {
             this.renderDragOverlay(this.dragOverCell.row, this.dragOverCell.col);
+        }
+    },
+
+    // Schedule one static-canvas redraw at most per animation frame.
+    // Use this instead of calling renderCanvas() directly from event/timer handlers.
+    scheduleRedraw: function() {
+        if (this._redrawPending) return;
+        this._redrawPending = true;
+        requestAnimationFrame(() => {
+            this._redrawPending = false;
+            this.renderCanvas();
+        });
+    },
+
+    // Draw only the moving playhead lines on the transparent overlay canvas.
+    // Called every animation frame by the playhead loop — very cheap.
+    renderPlayheadOverlay: function() {
+        if (!this.playheadCtx) return;
+        const ctx = this.playheadCtx;
+        const dpr = window.devicePixelRatio || 1;
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, this.canvasWidth, this.canvasHeight);
+
+        if (typeof AudioBridge === 'undefined') return;
+
+        const padding = 4;
+        const cellW = this.CELL_WIDTH - padding * 2;
+        const cellH = this.CELL_HEIGHT - padding * 2;
+
+        ctx.strokeStyle = '#00ff00';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = '#00ff00';
+        ctx.shadowBlur = 4;
+
+        for (let row = 0; row < AppState.numScenes; row++) {
+            for (let col = 0; col < AppState.numTracks; col++) {
+                const cellX = col * (this.CELL_WIDTH + this.CELL_GAP) + padding;
+                const cellY = row * (this.CELL_HEIGHT + this.CELL_GAP) + padding;
+
+                let playheadX = -1;
+                const clip = AppState.getClip(row, col);
+                const clipLength = (clip && clip.length) || 64;
+
+                // Scene playback
+                if (AudioBridge.playingSceneIndex === row &&
+                    AudioBridge.isPlaying &&
+                    AudioBridge.playbackStartTime &&
+                    AudioBridge.playbackSecondsPerStep > 0) {
+                    const elapsed = (performance.now() - AudioBridge.playbackStartTime) / 1000;
+                    const step = (elapsed / AudioBridge.playbackSecondsPerStep) % clipLength;
+                    playheadX = cellX + (step / clipLength) * cellW;
+                }
+                // Live mode
+                else if (AudioBridge.liveMode && AudioBridge.isLiveClipPlaying?.(row, col)) {
+                    const step = AudioBridge.getLiveClipPlayheadStep?.(col);
+                    if (step != null && step >= 0) {
+                        playheadX = cellX + (step / clipLength) * cellW;
+                    }
+                }
+
+                if (playheadX >= cellX) {
+                    ctx.beginPath();
+                    ctx.moveTo(playheadX, cellY);
+                    ctx.lineTo(playheadX, cellY + cellH);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        ctx.shadowBlur = 0;
+    },
+
+    // Start the per-frame overlay loop. Idempotent — safe to call multiple times.
+    startPlayheadLoop: function() {
+        if (this._playheadLoopId) {
+            cancelAnimationFrame(this._playheadLoopId);
+        }
+        const loop = () => {
+            this.renderPlayheadOverlay();
+            this._playheadLoopId = requestAnimationFrame(loop);
+        };
+        this._playheadLoopId = requestAnimationFrame(loop);
+    },
+
+    // Stop the overlay loop and clear the overlay canvas.
+    stopPlayheadLoop: function() {
+        if (this._playheadLoopId) {
+            cancelAnimationFrame(this._playheadLoopId);
+            this._playheadLoopId = null;
+        }
+        if (this.playheadCtx) {
+            const dpr = window.devicePixelRatio || 1;
+            this.playheadCtx.setTransform(1, 0, 0, 1, 0, 0);
+            this.playheadCtx.clearRect(0, 0, this.canvasWidth * dpr, this.canvasHeight * dpr);
         }
     },
 
@@ -551,49 +663,6 @@ const SongScreen = {
 
         ctx.globalAlpha = 1;
 
-        // Draw playhead for scene playback (per-track cycling)
-        if (typeof AudioBridge !== 'undefined' &&
-            AudioBridge.playingSceneIndex === sceneIndex &&
-            AudioBridge.isPlaying &&
-            AudioBridge.playbackStartTime) {
-            // Calculate elapsed steps from start time
-            const elapsed = (performance.now() - AudioBridge.playbackStartTime) / 1000;
-            const elapsedSteps = elapsed / AudioBridge.playbackSecondsPerStep;
-
-            // Use this track's clip length for cycling (not global playbackTotalSteps)
-            const trackPlayheadStep = elapsedSteps % clipLength;
-            const playheadX = x + (trackPlayheadStep / clipLength) * width;
-
-            ctx.strokeStyle = '#00ff00';
-            ctx.lineWidth = 2;
-            ctx.shadowColor = '#00ff00';
-            ctx.shadowBlur = 4;
-            ctx.beginPath();
-            ctx.moveTo(playheadX, y);
-            ctx.lineTo(playheadX, y + height);
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-        }
-
-        // Draw playhead for live mode
-        if (typeof AudioBridge !== 'undefined' &&
-            AudioBridge.liveMode &&
-            AudioBridge.isLiveClipPlaying?.(sceneIndex, trackIndex)) {
-            const playheadStep = AudioBridge.getLiveClipPlayheadStep?.(trackIndex);
-            if (playheadStep >= 0) {
-                const playheadX = x + (playheadStep / clipLength) * width;
-                ctx.strokeStyle = '#00ff00';
-                ctx.lineWidth = 2;
-                ctx.shadowColor = '#00ff00';
-                ctx.shadowBlur = 4;
-                ctx.beginPath();
-                ctx.moveTo(playheadX, y);
-                ctx.lineTo(playheadX, y + height);
-                ctx.stroke();
-                ctx.shadowBlur = 0;
-            }
-        }
-
         ctx.restore();
     },
 
@@ -650,30 +719,6 @@ const SongScreen = {
                 fileName = fileName.substring(0, 8) + '...';
             }
             ctx.fillText(fileName, x + width / 2, y + height / 2);
-        }
-
-        // Draw playhead for scene playback
-        if (typeof AudioBridge !== 'undefined' &&
-            AudioBridge.playingSceneIndex === sceneIndex &&
-            AudioBridge.isPlaying &&
-            AudioBridge.playbackStartTime) {
-            const clip = AppState.clips[sceneIndex]?.[trackIndex];
-            const clipLength = clip?.length || 64;
-            const elapsed = (performance.now() - AudioBridge.playbackStartTime) / 1000;
-            const elapsedSteps = elapsed / AudioBridge.playbackSecondsPerStep;
-            const trackPlayheadStep = elapsedSteps % clipLength;
-            const playheadX = x + (trackPlayheadStep / clipLength) * width;
-
-            ctx.strokeStyle = '#00ff00';
-            ctx.lineWidth = 2;
-            ctx.shadowColor = '#00ff00';
-            ctx.shadowBlur = 4;
-            ctx.globalAlpha = 1;
-            ctx.beginPath();
-            ctx.moveTo(playheadX, y);
-            ctx.lineTo(playheadX, y + height);
-            ctx.stroke();
-            ctx.shadowBlur = 0;
         }
 
         ctx.restore();
@@ -932,7 +977,7 @@ const SongScreen = {
 
     // Render clip previews (compatibility method)
     renderClipPreviews: function() {
-        this.renderCanvas();
+        this.scheduleRedraw();
     },
 
     // Render rows (compatibility method for loadSong etc.)
@@ -1243,10 +1288,8 @@ const SongScreen = {
     },
 
     // Render playheads for live playing clips
-    renderLivePlayheads: function() {
-        if (!AudioBridge.liveMode) return;
-        this.renderCanvas();
-    },
+    // No-op: playheads are drawn on the overlay canvas by the playhead loop.
+    renderLivePlayheads: function() {},
 
     // Update playback timing when tempo changes
     updatePlaybackTiming: function() {

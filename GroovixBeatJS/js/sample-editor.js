@@ -225,14 +225,14 @@ const SampleEditor = {
         const key = `${sceneIndex}_${trackIndex}`;
         if (!this.clipSamples[key]) {
             this.clipSamples[key] = {
-                audioBuffer: null,       // For browser playback only
+                audioBuffer: null,       // Only used in browser-only mode (no JUCE)
                 fileName: null,
                 fullPath: null,          // Path to file in project folder
                 originalSourcePath: null, // Original source path before copying (for restore)
                 selection: { start: 0, end: 0 },
                 offset: 0,               // Offset in seconds (can be negative)
                 detectedBPM: null,       // Detected or user-set BPM
-                // C++ waveform data for display
+                // Waveform data from C++ for display
                 waveformPeaks: null,     // Array of [min, max] pairs from C++
                 duration: 0,             // Duration in seconds from C++
                 transients: [],          // Detected transient positions in seconds from C++
@@ -1404,34 +1404,14 @@ const SampleEditor = {
 
         console.log('[SampleEditor] Restoring sample from:', trackSample.originalSourcePath);
 
-        // Re-load the sample from the original source
-        // This will copy it again to the project folder, overwriting any edits
         try {
             const sourcePath = trackSample.originalSourcePath;
 
-            // Request JUCE to re-copy the sample
+            // Request JUCE to re-copy the sample (overwrites edited file)
             const actualPath = await this.requestSampleCopy(sourcePath, trackIndex, sceneIndex);
-
-            // Load the restored audio
-            const encodedPath = encodeURIComponent(actualPath);
-            const response = await fetch(`/api/loadSample?path=${encodedPath}`);
-
-            if (!response.ok) {
-                console.error('Failed to load restored sample:', response.status);
-                alert('Failed to restore sample file.');
-                return;
-            }
-
-            const arrayBuffer = await response.arrayBuffer();
-            const audioContext = this.initAudioContext();
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-
-            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
             const fileName = actualPath.split(/[/\\]/).pop();
 
-            trackSample.audioBuffer = audioBuffer;  // Keep for browser playback
+            // Update metadata
             trackSample.fileName = fileName;
             trackSample.fullPath = actualPath;
             // Keep originalSourcePath the same
@@ -1441,7 +1421,7 @@ const SampleEditor = {
             trackSample.waveformPeaks = null;
             trackSample.duration = 0;
             trackSample.transients = [];
-            trackSample.hasUnsavedCppEdits = false;  // Restored to original, no edits
+            trackSample.hasUnsavedCppEdits = false;
 
             this.zoom = 1.0;
             this.scrollOffset = 0;
@@ -1451,7 +1431,7 @@ const SampleEditor = {
                 fileNameDisplay.textContent = fileName;
             }
 
-            // Request waveform from C++ (includes transients)
+            // Load restored file in C++ for editing and waveform
             if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
                 AudioBridge.send('cppLoadForEditing', {
                     trackIndex: trackIndex,
@@ -1559,7 +1539,7 @@ const SampleEditor = {
     // Show warp dialog
     showWarpDialog: function() {
         const trackSample = this.getTrackSample(AppState.currentTrack);
-        if (!trackSample.audioBuffer) {
+        if (!trackSample.fullPath && !trackSample.audioBuffer) {
             alert('Please load a sample first');
             return;
         }
@@ -1721,7 +1701,7 @@ const SampleEditor = {
     // Offset sample left or right
     offsetSample: function(deltaSeconds) {
         const trackSample = this.getTrackSample(AppState.currentTrack);
-        if (!trackSample.audioBuffer) return;
+        if (!trackSample.fullPath && !trackSample.audioBuffer) return;
 
         // Use C++ implementation when in JUCE mode
         if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
@@ -2242,73 +2222,48 @@ const SampleEditor = {
         });
     },
 
-    // Load a sample file via JUCE resource provider
+    // Load a sample file via JUCE
     // sceneIndex and trackIndex are optional - if not provided, uses AppState.currentScene/Track
-    loadSampleFromJuce: async function(filePath, sceneIndex, trackIndex) {
+    loadSampleFromJuce: async function(filePath, sceneIndex, trackIndex, skipCopy) {
         try {
             // Capture scene and track at call time to avoid race conditions during async operations
             const scene = sceneIndex !== undefined ? sceneIndex : (AppState.currentScene || 0);
             const track = trackIndex !== undefined ? trackIndex : AppState.currentTrack;
 
-            console.log('[SampleEditor] loadSampleFromJuce called - scene:', scene, 'track:', track, 'path:', filePath);
+            console.log('[SampleEditor] loadSampleFromJuce called - scene:', scene, 'track:', track, 'path:', filePath, 'skipCopy:', !!skipCopy);
 
-            // First, request JUCE to copy the sample to the project folder
-            console.log('[SampleEditor] Requesting sample copy to project folder...');
-            const actualPath = await this.requestSampleCopy(filePath, track, scene);
+            let actualPath;
+            if (skipCopy) {
+                // File is already in the project folder (e.g., loading from saved project)
+                actualPath = filePath;
+            } else {
+                // Request JUCE to copy the sample to the project folder
+                console.log('[SampleEditor] Requesting sample copy to project folder...');
+                actualPath = await this.requestSampleCopy(filePath, track, scene);
+            }
             console.log('[SampleEditor] Using sample path:', actualPath);
-
-            // Encode the file path for URL
-            const encodedPath = encodeURIComponent(actualPath);
-            const response = await fetch(`/api/loadSample?path=${encodedPath}`);
-
-            if (!response.ok) {
-                console.error('Failed to load sample:', response.status);
-                alert('Failed to load sample file.');
-                return;
-            }
-
-            // Get the audio data as ArrayBuffer
-            const arrayBuffer = await response.arrayBuffer();
-
-            // Decode the audio
-            const audioContext = this.initAudioContext();
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-
-            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
             // Extract filename from path
             const fileName = actualPath.split(/[/\\]/).pop();
 
-            // Use the captured scene/track values, not current AppState values
+            // Store metadata — no need to fetch the WAV into JS.
+            // C++ handles all playback and editing; waveform peaks come from C++ too.
             const trackSample = this.getClipSample(scene, track);
-            trackSample.audioBuffer = audioBuffer;  // Keep for browser playback
             trackSample.fileName = fileName;
-            trackSample.fullPath = actualPath;  // Store the copied path for playback
-            trackSample.originalSourcePath = filePath;  // Store original source for restore
+            trackSample.fullPath = actualPath;
+            trackSample.originalSourcePath = filePath;
             console.log('[SampleEditor] Sample STORED at key:', scene + '_' + track,
                         'scene:', scene, 'track:', track, 'fullPath:', actualPath);
             trackSample.selection = { start: 0, end: 0 };
             trackSample.offset = 0;
             trackSample.detectedBPM = null;
             trackSample.transients = [];
-            trackSample.hasUnsavedCppEdits = false;  // Fresh load, no edits yet
-
-            // Generate waveform peaks from AudioBuffer immediately for clip preview
-            // (C++ may update with higher quality data later)
-            trackSample.waveformPeaks = this.generateWaveformPeaks(audioBuffer, 100);
-            trackSample.duration = audioBuffer.duration;
-            console.log('[SampleEditor] Generated waveform peaks from AudioBuffer:',
-                        trackSample.waveformPeaks.length, 'peaks, duration:', trackSample.duration);
+            trackSample.hasUnsavedCppEdits = false;
+            trackSample.waveformPeaks = null;
+            trackSample.duration = 0;
 
             // Set track type to sample (track-level setting)
             AppState.setTrackSettings(track, { trackType: 'sample' });
-
-            // Update song screen to show waveform preview in clip cell
-            if (typeof SongScreen !== 'undefined') {
-                SongScreen.renderCanvas();
-            }
 
             this.zoom = 1.0;
             this.scrollOffset = 0;
@@ -2321,17 +2276,12 @@ const SampleEditor = {
                 }
             }
 
-            // Only request C++ waveform for the CURRENT clip being edited by user
-            // During bulk loading (deserialization), skip C++ requests because:
-            // 1. C++ only maintains one sample per track, so concurrent loads overwrite each other
-            // 2. JS already generates correct peaks from AudioBuffer above
-            // 3. C++ waveform is only needed for high-quality display in the editor
+            // Load into C++ for editing and waveform generation (current clip only)
+            // Non-current clips get their waveform when user navigates to them
             const isCurrentClip = (track === AppState.currentTrack && scene === (AppState.currentScene || 0));
 
             if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode() && isCurrentClip) {
                 console.log('[SampleEditor] Loading sample for editing in C++ - track:', track, 'scene:', scene);
-
-                // First ensure sample is loaded for editing in C++
                 AudioBridge.send('cppLoadForEditing', {
                     trackIndex: track,
                     filePath: actualPath
@@ -2340,14 +2290,13 @@ const SampleEditor = {
                 // Request waveform data (includes peaks, duration, transients)
                 setTimeout(() => {
                     this.requestWaveformFromCpp(track);
-                }, 100);  // Small delay to ensure load completes
-            } else if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
-                // For non-current clips, just log that we're skipping C++ load
-                console.log('[SampleEditor] Skipping C++ load for non-current clip - track:', track, 'scene:', scene,
-                            '(current track:', AppState.currentTrack, 'scene:', AppState.currentScene, ')');
+                }, 100);
             }
 
             this.render();
+
+            // Update song screen after C++ provides waveform peaks
+            // (handleCppWaveformResult will call SongScreen.renderCanvas)
         } catch (error) {
             console.error('Error loading sample from JUCE:', error);
             alert('Error loading audio file: ' + (error.message || 'Unknown error'));
@@ -2367,8 +2316,8 @@ const SampleEditor = {
         // If AudioBridge is in external mode, route sample playback through JUCE
         if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
             const trackSample = this.getTrackSample(AppState.currentTrack);
-            if (!trackSample.audioBuffer || !trackSample.fullPath) {
-                console.log('[SampleEditor] No sample loaded or no file path for JUCE playback');
+            if (!trackSample.fullPath) {
+                console.log('[SampleEditor] No sample loaded for JUCE playback');
                 return;
             }
 
@@ -2402,34 +2351,15 @@ const SampleEditor = {
                         trackSample.fullPath,
                         trackSample.offset || 0
                     );
+                    this.isPlaying = true;
+                    this.updatePlayButton();
                 } else {
-                    // Normal Mode: Play immediately
-                    // Get playback mode and clip length from settings
-                    const trackSettings = AppState.getTrackSettings(AppState.currentTrack);
-                    const shouldLoop = trackSettings.playbackMode === 'loop';
-                    const clip = AppState.clips[AppState.currentScene]?.[AppState.currentTrack];
-                    const clipLength = clip?.length || 64;  // Default 4 bars
-
-                    // Let JUCE handle looping natively with the clip length
-                    AudioBridge.playSampleFile(
-                        AppState.currentTrack,
-                        trackSample.fullPath,
-                        trackSample.offset || 0,
-                        shouldLoop,
-                        clipLength  // Pass clip length in steps for JUCE to handle looping
-                    );
-
-                    // Start the transport so timing updates flow
-                    AudioBridge.send('playClip', {});
-
-                    // Set AudioBridge state for UI updates
-                    AudioBridge.isPlaying = true;
-                    AudioBridge.clipPaused = false;
-                    AudioBridge.clipResumeOffset = 0;
-                    AudioBridge.updatePlayButton(true, false);
+                    // Normal Mode: Delegate to toggleClip which correctly sends
+                    // stopAllSamples -> playSampleFile -> playClip in one sequence
+                    // (avoids the start-stop-start issue of sending playSampleFile separately)
+                    AudioBridge.toggleClip();
+                    this.isPlaying = true;
                 }
-                this.isPlaying = true;
-                this.updatePlayButton();
             }
             return;
         }
@@ -2568,22 +2498,28 @@ function handleEditedSampleSaved(trackIndex, newPath, success, requestId, sceneI
 }
 
 // Global callback function for C++ sample editing operations
-function handleCppEditResult(command, trackIndex, success) {
-    console.log('[handleCppEditResult] Command:', command, 'Track:', trackIndex, 'Success:', success);
+function handleCppEditResult(command, trackIndex, success, updatedFilePath) {
+    console.log('[handleCppEditResult] Command:', command, 'Track:', trackIndex, 'Success:', success,
+                'updatedFilePath:', updatedFilePath || '(none)');
 
     if (success) {
-        // Mark the sample as having unsaved edits (unless it's a reset command)
         const trackSample = SampleEditor.getTrackSample(trackIndex);
         if (trackSample) {
-            if (command === 'cppReset') {
-                // Reset clears all edits
-                trackSample.hasUnsavedCppEdits = false;
-                console.log('[handleCppEditResult] Cleared unsaved edits flag (reset)');
-            } else {
-                // All other edit commands mark as having unsaved edits
-                trackSample.hasUnsavedCppEdits = true;
-                console.log('[handleCppEditResult] Marked as having unsaved C++ edits');
+            // Update file path if C++ flushed edits to disk (e.g., .mp3 -> .wav)
+            if (updatedFilePath && updatedFilePath !== trackSample.fullPath) {
+                console.log('[handleCppEditResult] Updating fullPath from', trackSample.fullPath, 'to', updatedFilePath);
+                trackSample.fullPath = updatedFilePath;
+
+                // Also update the clip sample's fullPath for the current scene
+                const clipSample = SampleEditor.getClipSample(AppState.currentScene, trackIndex);
+                if (clipSample && clipSample !== trackSample) {
+                    clipSample.fullPath = updatedFilePath;
+                }
             }
+
+            // Edits are flushed to disk immediately by C++, so they are not "unsaved"
+            trackSample.hasUnsavedCppEdits = false;
+            console.log('[handleCppEditResult] Edits flushed to disk, hasUnsavedCppEdits=false');
         }
 
         // Request updated waveform from C++
@@ -2643,33 +2579,26 @@ function handleCppWaveformResult(trackIndex, peaks, duration, transients) {
                     'Duration:', duration,
                     'Transients:', transients ? transients.length : 0);
 
-        // Only update if this is the currently active track being edited
-        // This prevents C++ peaks from overwriting JS-generated peaks for other scenes
-        if (AppState.currentTrack !== trackIndex) {
-            console.log('[handleCppWaveformResult] Ignoring - not current track (current:', AppState.currentTrack, ')');
-            return;
-        }
-
         const trackSample = SampleEditor.getTrackSample(trackIndex);
         if (trackSample) {
             const isNewSample = trackSample.duration === 0 && duration > 0;
+            const isCurrentTrack = AppState.currentTrack === trackIndex;
 
-            // Always update peaks when we receive them from C++ for the current track
-            // This ensures waveform updates after edit operations like stretch/compress
-            // The current track check above prevents overwriting JS-generated peaks for other scenes
+            // Always update peaks, duration, and transients from C++
             if (peaks && peaks.length > 0) {
                 trackSample.waveformPeaks = peaks;
                 console.log('[handleCppWaveformResult] Updated peaks from C++ (' + peaks.length + ' points)');
             }
 
-            // Always update duration and transients from C++ as they're more accurate
             if (duration > 0) {
                 trackSample.duration = duration;
             }
-            trackSample.transients = transients || [];
+            if (isCurrentTrack) {
+                trackSample.transients = transients || [];
+            }
 
-            // Auto-calculate clip length when a new sample is loaded
-            if (isNewSample && duration > 0) {
+            // Auto-calculate clip length when a new sample is loaded (current track only)
+            if (isCurrentTrack && isNewSample && duration > 0) {
                 const tempo = AppState.tempo || 120;
                 const secondsPerStep = 60 / tempo / 4;  // Duration of one 1/16th note
                 const stepsFromSample = Math.ceil(duration / secondsPerStep);
@@ -2686,17 +2615,23 @@ function handleCppWaveformResult(trackIndex, peaks, duration, transients) {
                 // Update currentLength if this is the current track
                 AppState.currentLength = calculatedLength;
 
+                // Update the length selector UI
+                const lengthSelect = document.getElementById('lengthSelect');
+                if (lengthSelect) {
+                    lengthSelect.value = calculatedLength;
+                }
+
                 console.log('[handleCppWaveformResult] Auto-set clip length:', calculatedLength,
                             'steps (', calculatedLength / 16, 'bars) for', duration.toFixed(2),
                             'sec sample at', tempo, 'BPM, scene:', currentScene);
             }
 
-            // Re-render to show updated waveform
-            if (SampleEditor.isVisible) {
+            // Re-render waveform editor for the current track
+            if (isCurrentTrack && SampleEditor.isVisible) {
                 SampleEditor.render();
             }
 
-            // Update song screen to reflect new clip length
+            // Update song screen clip previews (shows waveform thumbnails)
             if (typeof SongScreen !== 'undefined') {
                 SongScreen.renderCanvas();
             }

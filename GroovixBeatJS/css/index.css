@@ -139,6 +139,7 @@ h1 {
 
 .clip-canvas-container {
     flex: 1;
+    position: relative;
 }
 
 #clipGridCanvas {

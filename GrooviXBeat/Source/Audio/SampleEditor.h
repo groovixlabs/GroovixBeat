@@ -45,6 +45,9 @@ public:
     /** Get currently loaded file path */
     juce::String getFilePath() const { return currentFilePath; }
 
+    /** Update the stored file path (e.g., after saving with a new extension) */
+    void setFilePath(const juce::String& path) { currentFilePath = path; }
+
     /** Clear the loaded sample */
     void clear();
 

@@ -77,9 +77,6 @@ public:
     juce::File getProjectFolder() const { return projectFolder; }
     void setProjectFolder(const juce::File& folder) { projectFolder = folder; }
 
-    // Save edited samples to disk before project save
-    void saveEditedSamples();
-
     // Persist project folder path to settings
     void saveProjectFolderPath();
     void loadProjectFolderPath();

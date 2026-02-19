@@ -544,91 +544,12 @@ void SequencerComponent::pingSequencer()
         });
 }
 
-void SequencerComponent::saveEditedSamples()
-{
-    // Determine save folder for edited samples
-    juce::File samplesFolder;
-    if (projectFolder.exists())
-        samplesFolder = projectFolder.getChildFile("EditedSamples");
-    else
-        samplesFolder = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("EditedSamples");
-
-    auto trackIndices = samplePlayerManager.getTrackIndices();
-
-    for (int trackIndex : trackIndices)
-    {
-        auto* player = samplePlayerManager.getPlayerForTrack(trackIndex);
-        if (player == nullptr) continue;
-
-        auto* editor = player->getSampleEditor();
-        if (editor == nullptr || !editor->isLoaded()) continue;
-
-        // Only save if the sample has been edited (undo stack is non-empty)
-        if (!editor->canUndo()) continue;
-
-        // Build output filename from original path
-        juce::String originalPath = editor->getFilePath();
-        juce::String baseName;
-        if (originalPath.isNotEmpty())
-            baseName = juce::File(originalPath).getFileNameWithoutExtension();
-        else
-            baseName = "track_" + juce::String(trackIndex);
-
-        samplesFolder.createDirectory();
-        juce::File outputFile = samplesFolder.getChildFile(baseName + "_edited.wav");
-
-        // Avoid overwriting by adding a number suffix
-        int suffix = 1;
-        while (outputFile.existsAsFile())
-        {
-            outputFile = samplesFolder.getChildFile(baseName + "_edited_" + juce::String(suffix++) + ".wav");
-        }
-
-        if (editor->saveToFile(outputFile))
-        {
-            DBG("Saved edited sample for track " + juce::String(trackIndex) + " to: " + outputFile.getFullPathName());
-
-            // Update JS with the new file path so it gets serialized correctly
-            // Use sync evaluation to ensure paths are updated before serialize runs
-            // Only update clips whose filePath matches the original source file
-            juce::String escapedPath = outputFile.getFullPathName().replace("\\", "\\\\");
-            juce::String escapedOriginal = originalPath.replace("\\", "\\\\");
-            juce::String js = R"(
-                if (typeof SampleEditor !== 'undefined') {
-                    const origPath = ')" + escapedOriginal + R"(';
-                    // Update only clips on this track that reference the original file
-                    for (const [key, sample] of Object.entries(SampleEditor.clipSamples || {})) {
-                        const parts = key.split('_');
-                        if (parts.length === 2 && parseInt(parts[1]) === )" + juce::String(trackIndex) + R"() {
-                            if (sample.filePath === origPath || sample.fullPath === origPath) {
-                                sample.filePath = ')" + escapedPath + R"(';
-                                sample.fullPath = ')" + escapedPath + R"(';
-                            }
-                        }
-                    }
-                    // Update current track sample only if it matches
-                    const ts = SampleEditor.getTrackSample()" + juce::String(trackIndex) + R"();
-                    if (ts && (ts.filePath === origPath || ts.fullPath === origPath)) {
-                        ts.filePath = ')" + escapedPath + R"(';
-                        ts.fullPath = ')" + escapedPath + R"(';
-                    }
-                }
-            )";
-            evaluateJavaScriptSync(js);
-        }
-        else
-        {
-            DBG("Failed to save edited sample for track " + juce::String(trackIndex));
-        }
-    }
-}
-
 void SequencerComponent::saveSequencerState()
 {
     DBG("SequencerComponent::saveSequencerState called");
 
-    // Save any edited samples to disk first, and update JS paths
-    saveEditedSamples();
+    // Edited samples are already flushed to disk by flushTrackToDisk() after each edit.
+    // JS paths are already updated, so we can serialize directly.
 
     // Get app state from JavaScript
     String appState = evaluateJavaScriptSync(R"(
@@ -1550,10 +1471,21 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
         DBG("Queue live clip: scene=" + juce::String(sceneIndex) + " track=" + juce::String(trackIndex));
         // TODO: Implement live mode scheduling
     }
-    else if (command == "startLiveMode" || command == "stopLiveMode" || command == "toggleLiveMode")
+    else if (command == "startLiveMode")
     {
-        // Live mode state is managed by JavaScript, JUCE just handles playback
-        DBG("Live mode command: " + command);
+        DBG("startLiveMode: entering live mode — clearing clips, enabling live mode flag");
+        midiBridge.clearAllClips();
+        midiBridge.setLiveMode(true);
+    }
+    else if (command == "stopLiveMode")
+    {
+        DBG("stopLiveMode: leaving live mode");
+        midiBridge.setLiveMode(false);
+    }
+    else if (command == "toggleLiveMode")
+    {
+        // toggleLiveMode is no longer used; JS sends explicit startLiveMode/stopLiveMode
+        DBG("toggleLiveMode received (ignored — use startLiveMode/stopLiveMode)");
     }
     else if (command == "playLiveClip")
     {
@@ -1566,6 +1498,21 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
         int trackIndex = payload.getProperty("trackIndex", 0);
         DBG("Stop live clip: track=" + juce::String(trackIndex));
         midiBridge.stopLiveClip(trackIndex);
+        // Also clear the clip data so globalPlay (transport still running)
+        // cannot keep rendering this track's notes after the live stop.
+        midiBridge.clearClip(trackIndex);
+    }
+    else if (command == "queueLiveMidiPlay")
+    {
+        int trackIndex = payload.getProperty("trackIndex", 0);
+        DBG("Queue live MIDI play: track=" + juce::String(trackIndex));
+        midiBridge.queueLiveMidiPlay(trackIndex);
+    }
+    else if (command == "queueLiveMidiStop")
+    {
+        int trackIndex = payload.getProperty("trackIndex", 0);
+        DBG("Queue live MIDI stop: track=" + juce::String(trackIndex));
+        midiBridge.queueLiveMidiStop(trackIndex);
     }
     else if (command == "controlChange")
     {
@@ -1916,10 +1863,18 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
 
             if (auto* manager = midiBridge.getSamplePlayerManager())
             {
-                // Reset all players first to clear stale file paths and sources
-                manager->resetAllPlayersForLiveMode();
+                // Flush any edited samples to disk so cache reads the edited versions
+                sampleEditorBridge.flushAllEditsToDisk();
 
-                // Then preload samples into cache
+                // Clear stale cache so preload re-reads flushed files from disk
+                manager->clearSampleCache();
+
+                // Reset all players and synchronise their cumulative-sample counter
+                // with the MidiClipScheduler so targetStartSample comparisons work.
+                int64_t currentAudioPos = midiBridge.getLatestAudioPosition();
+                manager->resetAllPlayersForLiveMode(currentAudioPos);
+
+                // Then preload samples into cache (reads edited files from disk)
                 manager->preloadSamplesForLiveMode(samplePaths);
             }
 
@@ -2275,8 +2230,11 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
 
         sampleEditorBridge.timeStretch(trackIndex, ratio, targetLengthSeconds);
 
+        // Notify JS of success and updated file path (may have changed extension to .wav)
+        juce::String updatedPath = sampleEditorBridge.getCurrentFilePath(trackIndex);
         juce::String js = "if (typeof handleCppEditResult === 'function') { handleCppEditResult('" +
-                          command + "', " + juce::String(trackIndex) + ", true); }";
+                          command + "', " + juce::String(trackIndex) + ", true, '" +
+                          updatedPath.replace("\\", "\\\\").replace("'", "\\'") + "'); }";
         evaluateJavaScript(js);
     }
     else if (command == "cppApplyWarp")
@@ -2293,8 +2251,11 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
 
         sampleEditorBridge.applyWarp(trackIndex, sampleBPM, targetBPM, targetLengthSeconds);
 
+        // Notify JS of success and updated file path (may have changed extension to .wav)
+        juce::String updatedPath = sampleEditorBridge.getCurrentFilePath(trackIndex);
         juce::String js = "if (typeof handleCppEditResult === 'function') { handleCppEditResult('" +
-                          command + "', " + juce::String(trackIndex) + ", true); }";
+                          command + "', " + juce::String(trackIndex) + ", true, '" +
+                          updatedPath.replace("\\", "\\\\").replace("'", "\\'") + "'); }";
         evaluateJavaScript(js);
     }
     else if (command == "cppDetectBPM")

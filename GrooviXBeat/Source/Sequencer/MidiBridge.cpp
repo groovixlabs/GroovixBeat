@@ -208,6 +208,9 @@ void MidiBridge::setQuantizeSteps(int steps)
 
     if (samplePlayerManager != nullptr)
         samplePlayerManager->setQuantizeSteps(quantizeSteps);
+
+    // Also propagate to MIDI clip scheduler for boundary detection
+    clipScheduler.setQuantizeSteps(quantizeSteps);
 }
 
 //==============================================================================
@@ -270,6 +273,16 @@ double MidiBridge::getPlayheadPositionBeats() const
 double MidiBridge::getCurrentTime() const
 {
     return juce::Time::getMillisecondCounterHiRes() / 1000.0;
+}
+
+int64_t MidiBridge::getNextQuantizeBoundarySample() const
+{
+    return clipScheduler.computeNextQuantizeBoundarySample();
+}
+
+int64_t MidiBridge::getLatestAudioPosition() const
+{
+    return clipScheduler.getLatestAudioPosition();
 }
 
 //==============================================================================
@@ -356,7 +369,17 @@ void MidiBridge::queueSampleFileSeamless(int trackIndex, const juce::String& fil
 
     if (samplePlayerManager != nullptr)
     {
-        samplePlayerManager->queueSampleFileSeamless(trackIndex, filePath, offset, loop, loopLengthBeats);
+        // Compute the exact quantize boundary sample so the audio thread can fire
+        // at the same sample position as MIDI clips.  Falls back to "next block"
+        // when no anchor is established yet (first clip in a session).
+        int64_t targetSample = getNextQuantizeBoundarySample();
+        if (targetSample < 0)
+            targetSample = getLatestAudioPosition(); // Fire at start of next audio block
+
+        DBG("MidiBridge::queueSampleFileSeamless - targetSample: " + juce::String(targetSample));
+
+        samplePlayerManager->queueSampleFileSeamless(trackIndex, filePath, offset, loop,
+                                                      loopLengthBeats, targetSample);
     }
     else
     {
@@ -370,7 +393,11 @@ void MidiBridge::queueStopSample(int trackIndex)
 
     if (samplePlayerManager != nullptr)
     {
-        samplePlayerManager->queueStopSample(trackIndex);
+        int64_t targetSample = getNextQuantizeBoundarySample();
+        if (targetSample < 0)
+            targetSample = getLatestAudioPosition();
+
+        samplePlayerManager->queueStopSample(trackIndex, targetSample);
     }
 }
 
@@ -428,4 +455,24 @@ void MidiBridge::stopLiveClip(int trackIndex)
 bool MidiBridge::isLiveClipPlaying(int trackIndex) const
 {
     return clipScheduler.isTrackPlaying(trackIndex);
+}
+
+void MidiBridge::queueLiveMidiPlay(int trackIndex)
+{
+    DBG("MidiBridge::queueLiveMidiPlay - track: " + juce::String(trackIndex));
+    clipScheduler.queueTrackPlay(trackIndex);
+}
+
+void MidiBridge::queueLiveMidiStop(int trackIndex)
+{
+    DBG("MidiBridge::queueLiveMidiStop - track: " + juce::String(trackIndex));
+    // Queue the stop — the audio thread fires it at the quantize boundary
+    // and clears the clip notes at that point (see MidiClipScheduler::renderTrackBlock).
+    clipScheduler.queueTrackStop(trackIndex);
+}
+
+void MidiBridge::setLiveMode(bool enabled)
+{
+    DBG("MidiBridge::setLiveMode - " + juce::String(enabled ? "ON" : "OFF"));
+    clipScheduler.setLiveMode(enabled);
 }

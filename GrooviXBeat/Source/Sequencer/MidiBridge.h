@@ -85,6 +85,15 @@ public:
     void stopLiveClip(int trackIndex);
     bool isLiveClipPlaying(int trackIndex) const;
 
+    /** Queue a MIDI live clip to start at the next quantize boundary. */
+    void queueLiveMidiPlay(int trackIndex);
+
+    /** Queue a MIDI live clip to stop at the next quantize boundary. */
+    void queueLiveMidiStop(int trackIndex);
+
+    /** Enter or exit live mode. In live mode, global transport does not trigger MIDI rendering. */
+    void setLiveMode(bool enabled);
+
     //==============================================================================
     // Quantization settings
     void setQuantizeSteps(int steps);
@@ -100,6 +109,17 @@ public:
 
     // Get current playhead position in beats (quarter notes)
     double getPlayheadPositionBeats() const;
+
+    /**
+     * Returns the absolute sample position of the next quantize boundary.
+     * Used by SamplePlayerPlugin to align sample starts with MIDI clip starts.
+     * Returns -1 if no timing reference is established (caller should use
+     * getLatestAudioPosition() as a "start immediately" fallback).
+     */
+    int64_t getNextQuantizeBoundarySample() const;
+
+    /** Returns the end-of-last-audio-block sample position (audio thread counter). */
+    int64_t getLatestAudioPosition() const;
 
 private:
     juce::MidiMessageCollector& midiCollector;

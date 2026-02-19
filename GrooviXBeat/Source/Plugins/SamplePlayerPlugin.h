@@ -108,12 +108,32 @@ public:
     double getPositionSeconds() const;
     void setPositionSeconds(double position);
 
+    /**
+     * Synchronise the internal cumulative-sample counter with the audio engine.
+     * Must be called (from the message thread) after resetForLiveMode() and before
+     * the first live-mode audio block, so targetStartSample comparisons are valid.
+     */
+    void setCumulativePosition(int64_t pos);
+
+    /**
+     * Set the absolute audio-thread sample position at which to start playback.
+     * The pending file/buffer must already be loaded before calling this.
+     * Checked on the audio thread in processBlock(); pass -1 to clear/disable.
+     */
+    void setTargetStartSample(int64_t samplePos);
+
+    /**
+     * Set the absolute audio-thread sample position at which to stop playback.
+     * Checked on the audio thread in processBlock(); pass -1 to clear/disable.
+     */
+    void setTargetStopSample(int64_t samplePos);
+
     //==============================================================================
     // Sample Editing API
 
     /**
      * Load a file for editing (into memory buffer).
-     * After editing, call applyEdits() to use the edited version.
+     * Edits are flushed to disk immediately, then the player reloads from file.
      */
     bool loadFileForEditing(const juce::String& filePath);
 
@@ -121,17 +141,12 @@ public:
     SampleEditor* getSampleEditor() { return sampleEditor.get(); }
     const SampleEditor* getSampleEditor() const { return sampleEditor.get(); }
 
-    /** Check if using editable buffer */
-    bool isUsingEditableBuffer() const { return useEditableBuffer; }
-
-    /** Apply edits and switch to using the edited buffer for playback */
-    void applyEdits();
-
     /** Discard edits and return to file-based playback */
     void discardEdits();
 
-    /** Reload from edited buffer after external modifications */
-    void reloadFromEditedBuffer();
+    /** Release file handle (readerSource/transportSource) without clearing the editor.
+     *  Call before overwriting the file on disk, then call loadFile() after. */
+    void releaseFileHandle();
 
     //==============================================================================
     // Track assignment
@@ -176,10 +191,23 @@ private:
     double fileSampleRate = 44100.0;
     juce::int64 fileLengthSamples = 0;
 
-    // Editable buffer support
+    // Sample editor (for waveform editing; edits are flushed to disk, not used for playback)
     std::unique_ptr<SampleEditor> sampleEditor;
-    bool useEditableBuffer = false;
-    juce::int64 editablePlayPosition = 0;  // Current play position in editable buffer
+
+    // -------------------------------------------------------------------------
+    // Audio-thread quantize triggering
+    //
+    // cumulativeSamplePosition: monotonically increasing counter incremented
+    //   by numSamples on every processBlock() call.  Reset to 0 in prepareToPlay
+    //   and re-synced from MidiBridge::getLatestAudioPosition() when entering
+    //   Live Mode, so it stays aligned with MidiClipScheduler's block counter.
+    //
+    // targetStartSample / targetStopSample: absolute sample positions at which to
+    //   fire a start or stop.  Written from the message thread (atomic), read and
+    //   cleared on the audio thread inside processBlock().  -1 = not armed.
+    int64_t cumulativeSamplePosition = 0;
+    std::atomic<int64_t> targetStartSample { -1 };
+    std::atomic<int64_t> targetStopSample  { -1 };
 
     // Playback state
     bool playing = false;
@@ -198,9 +226,9 @@ private:
     juce::int64 pendingFileLengthSamples = 0;
     bool hasPendingFile = false;
 
-    // Pending cached buffer for seamless Live Mode transitions (from cache)
-    juce::AudioBuffer<float> pendingCachedBuffer;
-    bool hasPendingCachedBuffer = false;
+    // MemoryBlocks that back WAV-in-memory readers (must outlive their reader/readerSource)
+    juce::MemoryBlock cachedMemoryBlock;
+    juce::MemoryBlock pendingMemoryBlock;
 
     // Flag to force immediate start on next sync (for first clip in Live Mode)
     bool needsImmediateStart = false;
@@ -226,10 +254,12 @@ private:
     juce::CriticalSection lock;
 
     //==============================================================================
-    void updatePlayingState();
-
-    // Process audio from editable buffer
-    void processFromEditableBuffer(juce::AudioBuffer<float>& buffer, int numSamples);
+    // Encode an AudioBuffer as 32-bit float WAV into a MemoryBlock and return a reader.
+    // The MemoryBlock must outlive the returned reader.
+    static juce::AudioFormatReader* createWavReaderFromBuffer(
+        const juce::AudioBuffer<float>& buffer,
+        double sampleRate,
+        juce::MemoryBlock& destBlock);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SamplePlayerPlugin)
 };

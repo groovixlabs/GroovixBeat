@@ -207,6 +207,14 @@ public:
      */
     bool saveToFile(int trackIndex, const juce::String& filePath);
 
+    /**
+     * Flush all edited samples to disk.
+     * For each track with an edited buffer, saves the buffer to its file path
+     * and reloads the player from the file so all playback paths use the same data.
+     * Call before Live Mode preload or project save.
+     */
+    void flushAllEditsToDisk();
+
     //==============================================================================
     // Query
 
@@ -275,6 +283,10 @@ private:
 
     // Get sample editor for a track (returns nullptr if not available)
     SampleEditor* getEditorForTrack(int trackIndex);
+
+    // Flush a single track's editable buffer to disk and reload from file.
+    // Returns the path saved to (may differ from original if extension changed), or empty on failure/no-op.
+    juce::String flushTrackToDisk(int trackIndex);
 
     // Peaks cache helpers
     juce::File getPeaksCacheFile(const juce::String& sampleFilePath);

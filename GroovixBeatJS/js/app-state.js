@@ -685,10 +685,13 @@ const AppState = {
                     clipSamples[key] = {
                         fileName: sample.fileName,
                         filePath: sample.filePath || sample.fullPath || null,
+                        originalSourcePath: sample.originalSourcePath || null,
                         offset: sample.offset || 0,
                         detectedBPM: sample.detectedBPM || null,
                         stretchFactor: sample.stretchFactor || 1.0,
-                        selection: sample.selection || { start: 0, end: 0 }
+                        selection: sample.selection || { start: 0, end: 0 },
+                        waveformPeaks: sample.waveformPeaks || null,
+                        duration: sample.duration || 0
                     };
                 }
             }
@@ -877,71 +880,32 @@ const AppState = {
                 // Clear existing samples
                 SampleEditor.clipSamples = {};
 
-                // Helper function to load a sample into a specific clip
+                // Helper function to restore a sample into a specific clip.
+                // During deserialization we only restore metadata — audio is NOT fetched
+                // via HTTP here because the WebView2 resource provider isn't ready yet
+                // (fetch would fail with ERR_NAME_NOT_RESOLVED).
+                // Audio is loaded on-demand when the user opens the clip editor, and
+                // C++ handles all playback from the file on disk.
                 const loadClipSample = (sceneIndex, trackIndex, sampleData) => {
-                    if (!sampleData || !sampleData.filePath) {
-                        // Just store metadata
-                        const clipSample = SampleEditor.getClipSample(sceneIndex, trackIndex);
-                        clipSample.fileName = sampleData?.fileName;
-                        clipSample.filePath = sampleData?.filePath;
-                        clipSample.fullPath = sampleData?.filePath;
-                        clipSample.offset = sampleData?.offset || 0;
-                        clipSample.detectedBPM = sampleData?.detectedBPM;
-                        clipSample.stretchFactor = sampleData?.stretchFactor || 1.0;
-                        clipSample.selection = sampleData?.selection || { start: 0, end: 0 };
-                        return;
+                    const clipSample = SampleEditor.getClipSample(sceneIndex, trackIndex);
+                    clipSample.fileName = sampleData?.fileName;
+                    clipSample.filePath = sampleData?.filePath;
+                    clipSample.fullPath = sampleData?.filePath;
+                    clipSample.offset = sampleData?.offset || 0;
+                    clipSample.detectedBPM = sampleData?.detectedBPM;
+                    clipSample.stretchFactor = sampleData?.stretchFactor || 1.0;
+                    clipSample.selection = sampleData?.selection || { start: 0, end: 0 };
+                    clipSample.waveformPeaks = sampleData?.waveformPeaks || null;
+                    clipSample.duration = sampleData?.duration || 0;
+                    if (sampleData?.originalSourcePath) {
+                        clipSample.originalSourcePath = sampleData.originalSourcePath;
                     }
 
-                    // Set track type to sample (track-level setting)
-                    AppState.setTrackSettings(trackIndex, { trackType: 'sample' });
-
-                    console.log('[AppState] Loading sample for scene', sceneIndex, 'track', trackIndex, ':', sampleData.filePath);
-
-                    // Load sample via JUCE resource provider - pass scene and track indices to avoid race conditions
-                    let loadPromise;
-                    if (typeof SampleEditor.loadSampleFromJuce === 'function') {
-                        loadPromise = SampleEditor.loadSampleFromJuce(sampleData.filePath, sceneIndex, trackIndex);
-                    } else {
-                        loadPromise = Promise.resolve();
+                    if (sampleData?.filePath) {
+                        // Set track type to sample (track-level setting)
+                        AppState.setTrackSettings(trackIndex, { trackType: 'sample' });
+                        console.log('[AppState] Restored sample metadata for scene', sceneIndex, 'track', trackIndex, ':', sampleData.filePath);
                     }
-
-                    loadPromise.then(() => {
-                        const clipSample = SampleEditor.getClipSample(sceneIndex, trackIndex);
-                        clipSample.offset = sampleData.offset || 0;
-                        clipSample.detectedBPM = sampleData.detectedBPM;
-                        clipSample.stretchFactor = sampleData.stretchFactor || 1.0;
-                        clipSample.selection = sampleData.selection || { start: 0, end: 0 };
-                        clipSample.filePath = sampleData.filePath;
-                        clipSample.fullPath = sampleData.filePath;
-                        clipSample.fileName = sampleData.fileName;
-
-                        // Generate waveform peaks from AudioBuffer for clip preview
-                        if (typeof SampleEditor.updateWaveformFromAudioBuffer === 'function') {
-                            SampleEditor.updateWaveformFromAudioBuffer(sceneIndex, trackIndex);
-                        }
-
-                        // Refresh song screen to show waveform preview
-                        if (typeof SongScreen !== 'undefined') {
-                            SongScreen.renderCanvas();
-                        }
-
-                        console.log('[AppState] Sample loaded successfully for scene', sceneIndex, 'track', trackIndex);
-                    }).catch(err => {
-                        console.warn('Failed to reload sample for scene', sceneIndex, 'track', trackIndex, ':', err);
-                        const clipSample = SampleEditor.getClipSample(sceneIndex, trackIndex);
-                        clipSample.fileName = sampleData.fileName;
-                        clipSample.filePath = sampleData.filePath;
-                        clipSample.fullPath = sampleData.filePath;
-                        clipSample.offset = sampleData.offset || 0;
-                        clipSample.detectedBPM = sampleData.detectedBPM;
-                        clipSample.stretchFactor = sampleData.stretchFactor || 1.0;
-                        clipSample.selection = sampleData.selection || { start: 0, end: 0 };
-
-                        // Try to generate waveform if audioBuffer exists
-                        if (clipSample.audioBuffer && typeof SampleEditor.updateWaveformFromAudioBuffer === 'function') {
-                            SampleEditor.updateWaveformFromAudioBuffer(sceneIndex, trackIndex);
-                        }
-                    });
                 };
 
                 // New format: clipSamples keyed by "sceneIndex_trackIndex"

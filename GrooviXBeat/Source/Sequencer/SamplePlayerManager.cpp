@@ -254,7 +254,8 @@ void SamplePlayerManager::queueSampleFileSeamless(int trackIndex,
                                                    const juce::String& filePath,
                                                    double offset,
                                                    bool loop,
-                                                   double loopLengthBeats)
+                                                   double loopLengthBeats,
+                                                   int64_t targetStartSample)
 {
     auto* player = getPlayerForTrack(trackIndex);
     if (player == nullptr)
@@ -274,6 +275,7 @@ void SamplePlayerManager::queueSampleFileSeamless(int trackIndex,
     // (no need for seamless switch). But if the source isn't valid, we need to load it.
     if (player->getCurrentFilePath() == filePath && player->hasValidSource())
     {
+        player->setTargetStartSample(targetStartSample);
         player->queuePlay(offset);
         DBG("SamplePlayerManager: Queued same file for track " + juce::String(trackIndex));
         return;
@@ -310,15 +312,21 @@ void SamplePlayerManager::queueSampleFileSeamless(int trackIndex,
         DBG("SamplePlayerManager: Queued seamless transition for track " + juce::String(trackIndex) +
             " - " + filePath);
     }
+
+    // Set the audio-thread target so processBlock fires at the exact boundary sample.
+    // This must be done AFTER loading the pending file/buffer so the player is ready.
+    player->setTargetStartSample(targetStartSample);
 }
 
-void SamplePlayerManager::queueStopSample(int trackIndex)
+void SamplePlayerManager::queueStopSample(int trackIndex, int64_t targetStopSample)
 {
     auto* player = getPlayerForTrack(trackIndex);
     if (player != nullptr)
     {
+        player->setTargetStopSample(targetStopSample);
         player->queueStop();
-        DBG("SamplePlayerManager: Queued stop for track " + juce::String(trackIndex));
+        DBG("SamplePlayerManager: Queued stop for track " + juce::String(trackIndex) +
+            " at sample " + juce::String(targetStopSample));
     }
 }
 
@@ -573,17 +581,21 @@ bool SamplePlayerManager::isSampleCached(const juce::String& filePath) const
     return sampleCache.find(filePath) != sampleCache.end();
 }
 
-void SamplePlayerManager::resetAllPlayersForLiveMode()
+void SamplePlayerManager::resetAllPlayersForLiveMode(int64_t currentAudioPosition)
 {
     juce::ScopedLock sl(lock);
 
-    DBG("SamplePlayerManager: Resetting all players for Live Mode");
+    DBG("SamplePlayerManager: Resetting all players for Live Mode (audioPos=" +
+        juce::String(currentAudioPosition) + ")");
 
     for (auto& pair : trackPlayers)
     {
         if (pair.second != nullptr)
         {
             pair.second->resetForLiveMode();
+            // Sync the player's cumulative position counter to the current audio
+            // position so targetStartSample comparisons in processBlock are correct.
+            pair.second->setCumulativePosition(currentAudioPosition);
         }
     }
 }

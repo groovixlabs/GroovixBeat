@@ -1216,7 +1216,7 @@ class CDrumPatterns
     {
         str+=`<option value="${i}">${this.g_DrumPatterns[i].name}</option>`;
     }
-    //$("#DrumPatternName").html(str);
+    
     return str;
 }
 
@@ -1237,14 +1237,14 @@ class CDrumPatterns
 
  GetDrumPatternStyle(drumpattern,drumstyle)
 {
-    //let drumpattern=$("#DrumPatternName").val();
-    //let drumstyle=$("#DrumPatternStyle").val();
+    
+    
     let pat=this.g_DrumPatterns[drumpattern].styles[drumstyle].data;
     
     //console.log(pat);
     
     let ptable=this.PatToTable(pat)
-    //$("#DrumPatternTable").html(ptable);
+    
     return ptable
 }
 
@@ -1253,7 +1253,7 @@ PatToTable(pat)
     let table="<table class='drumpat_table'>\n";
     pat=pat.trim();
 
-    //$("#DrumWizardText").val(pat);
+    
 
     let patA=pat.split("\n");
     for(let i=0;i<patA.length;i++)

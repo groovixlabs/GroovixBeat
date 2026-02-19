@@ -1,1 +1,1 @@
-groovixbeatjs_version = "Groovix Beat V 1.0";
+groovixbeatjs_version = "Groovix Beat V 1.0 *** DEBUG MODE *** ";

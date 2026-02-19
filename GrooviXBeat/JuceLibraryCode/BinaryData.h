@@ -15,7 +15,7 @@ namespace BinaryData
     const int            cello_wavSize = 46348;
 
     extern const char*   GroovixBeatJS_zip;
-    const int            GroovixBeatJS_zipSize = 1237619;
+    const int            GroovixBeatJS_zipSize = 1238295;
 
     extern const char*   GroovixLabsSplash_png;
     const int            GroovixLabsSplash_pngSize = 63770;

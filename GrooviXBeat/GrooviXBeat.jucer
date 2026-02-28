@@ -45,6 +45,9 @@
       <GROUP id="{6F257CD6-CE86-9BBC-54C1-45E43249E414}" name="Plugins">
         <FILE id="rcuPqK" name="ARAPlugin.cpp" compile="1" resource="0" file="Source/Plugins/ARAPlugin.cpp"/>
         <FILE id="gR1tiA" name="ARAPlugin.h" compile="0" resource="0" file="Source/Plugins/ARAPlugin.h"/>
+        <FILE id="Lptast" name="DrumKitPlugin.cpp" compile="1" resource="0"
+              file="Source/Plugins/DrumKitPlugin.cpp"/>
+        <FILE id="KTTMk9" name="DrumKitPlugin.h" compile="0" resource="0" file="Source/Plugins/DrumKitPlugin.h"/>
         <FILE id="pov6wS" name="InternalPlugins.cpp" compile="1" resource="0"
               file="Source/Plugins/InternalPlugins.cpp"/>
         <FILE id="MV6AI1" name="InternalPlugins.h" compile="0" resource="0"
@@ -73,6 +76,10 @@
               file="Source/Plugins/TrackMixerPlugin.h"/>
       </GROUP>
       <GROUP id="{C0446839-00EC-1088-FB6E-A612BDD309D4}" name="Sequencer">
+        <FILE id="Sh9TLw" name="DrumKitManager.cpp" compile="1" resource="0"
+              file="Source/Sequencer/DrumKitManager.cpp"/>
+        <FILE id="GJLCCh" name="DrumKitManager.h" compile="0" resource="0"
+              file="Source/Sequencer/DrumKitManager.h"/>
         <FILE id="unMpCt" name="MidiBridge.cpp" compile="1" resource="0" file="Source/Sequencer/MidiBridge.cpp"/>
         <FILE id="sgK1Op" name="MidiBridge.h" compile="0" resource="0" file="Source/Sequencer/MidiBridge.h"/>
         <FILE id="bF7qXZ" name="MidiClipScheduler.cpp" compile="1" resource="0"

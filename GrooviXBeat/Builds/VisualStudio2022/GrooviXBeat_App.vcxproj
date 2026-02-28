@@ -152,6 +152,7 @@
     <ClCompile Include="..\..\Source\Audio\SampleDSP.cpp"/>
     <ClCompile Include="..\..\Source\Audio\SampleEditor.cpp"/>
     <ClCompile Include="..\..\Source\Plugins\ARAPlugin.cpp"/>
+    <ClCompile Include="..\..\Source\Plugins\DrumKitPlugin.cpp"/>
     <ClCompile Include="..\..\Source\Plugins\InternalPlugins.cpp"/>
     <ClCompile Include="..\..\Source\Plugins\IOConfigurationWindow.cpp"/>
     <ClCompile Include="..\..\Source\Plugins\MidiTrackOutput.cpp"/>
@@ -159,6 +160,7 @@
     <ClCompile Include="..\..\Source\Plugins\SamplePlayerPlugin.cpp"/>
     <ClCompile Include="..\..\Source\Plugins\SamplerInstrumentPlugin.cpp"/>
     <ClCompile Include="..\..\Source\Plugins\TrackMixerPlugin.cpp"/>
+    <ClCompile Include="..\..\Source\Sequencer\DrumKitManager.cpp"/>
     <ClCompile Include="..\..\Source\Sequencer\MidiBridge.cpp"/>
     <ClCompile Include="..\..\Source\Sequencer\MidiClipScheduler.cpp"/>
     <ClCompile Include="..\..\Source\Sequencer\MidiTrackOutputManager.cpp"/>
@@ -3080,6 +3082,7 @@
     <ClInclude Include="..\..\Source\Audio\SampleDSP.h"/>
     <ClInclude Include="..\..\Source\Audio\SampleEditor.h"/>
     <ClInclude Include="..\..\Source\Plugins\ARAPlugin.h"/>
+    <ClInclude Include="..\..\Source\Plugins\DrumKitPlugin.h"/>
     <ClInclude Include="..\..\Source\Plugins\InternalPlugins.h"/>
     <ClInclude Include="..\..\Source\Plugins\IOConfigurationWindow.h"/>
     <ClInclude Include="..\..\Source\Plugins\MidiTrackOutput.h"/>
@@ -3087,6 +3090,7 @@
     <ClInclude Include="..\..\Source\Plugins\SamplePlayerPlugin.h"/>
     <ClInclude Include="..\..\Source\Plugins\SamplerInstrumentPlugin.h"/>
     <ClInclude Include="..\..\Source\Plugins\TrackMixerPlugin.h"/>
+    <ClInclude Include="..\..\Source\Sequencer\DrumKitManager.h"/>
     <ClInclude Include="..\..\Source\Sequencer\MidiBridge.h"/>
     <ClInclude Include="..\..\Source\Sequencer\MidiClipScheduler.h"/>
     <ClInclude Include="..\..\Source\Sequencer\MidiTrackOutputManager.h"/>

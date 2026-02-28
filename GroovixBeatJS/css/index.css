@@ -80,7 +80,8 @@ h1 {
     width: 95vw;
     height: 90vh;
     */
-    max-width: 1400px;
+    /*max-width: 1400px;*/
+    margin-right: 10px;
 
     /*
     display: flex;
@@ -2524,6 +2525,15 @@ h1 {
                 -4px -4px 8px rgba(255, 255, 255, 0.05);
 }
 
+/* Master mixer channel — slightly wider and visually distinct */
+.song-mixer-master {
+    margin-left: 8px;
+    border-left: 2px solid #d5a865;
+    background: #2a2620;
+    box-shadow: 4px 4px 8px rgba(0, 0, 0, 0.6),
+                -4px -4px 8px rgba(213, 168, 101, 0.08);
+}
+
 /* Scene Play Button */
 .scene-play-btn {
     width: 20px;
@@ -3097,6 +3107,15 @@ h1 {
     margin-top: 10px;
     padding-top: 15px;
     border-top: 1px solid #333;
+}
+
+.clip-props-actions .clip-props-btn-action.danger {
+    margin-right: auto;
+    color: #c0392b;
+}
+
+.clip-props-actions .clip-props-btn-action.danger:hover {
+    color: #e74c3c;
 }
 
 .clip-props-btn-action {

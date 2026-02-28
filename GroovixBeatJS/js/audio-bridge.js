@@ -211,8 +211,7 @@ function JSFunctionForCallingFromJUCE(funcname,args)
     {
         // Ensure JUCE connection is established before deserializing
         // This allows the deserialize function to send instrument commands to JUCE
-        if (typeof window.connectToJUCE === 'function' && !AudioBridge.isExternalMode()) {
-            console.log('[JSFunctionForCallingFromJUCE] Connecting to JUCE before SetAppState...');
+        if (typeof window.connectToJUCE === 'function' && !AudioBridge.externalHandler) {
             window.connectToJUCE();
         }
 
@@ -257,9 +256,7 @@ const AudioBridge = {
     // Configuration
     // ==========================================
 
-    mode: 'external',  // JUCE-only mode
-
-    // External message handler (set by host)
+    // External message handler (set by JUCE host)
     externalHandler: null,
 
     // Callback for receiving timing updates from external renderer
@@ -269,7 +266,7 @@ const AudioBridge = {
     onTransportStateChange: null,
 
     // Debug mode
-    debug: true,  // Enable debug logging
+    debug: false,
 
     // ==========================================
     // Playback State (migrated from MidiEngine)
@@ -707,6 +704,92 @@ const AudioBridge = {
         }
     },
 
+    // Trigger an entire scene in Live Mode.
+    // If nothing is currently playing: all clips start immediately.
+    // If clips are playing: at the next quantize boundary, stop all current clips
+    // and start all clips in the new scene.
+    queueLiveScene: function(sceneIndex) {
+        if (!this.liveMode) return;
+
+        // Collect tracks in the target scene that have actual playable content.
+        // Tracks with empty clips (no notes / no sample file) are excluded so that
+        // any clip currently playing on those tracks is stopped at the boundary.
+        const tracksToStart = new Set();
+        for (let t = 0; t < AppState.numTracks; t++) {
+            const clip = AppState.clips[sceneIndex]?.[t];
+            if (!clip || clip.mute) continue;
+            const mixerState = AppState.getMixerState(t);
+            if (mixerState.mute) continue;
+
+            const trackSettings = AppState.getTrackSettings(t);
+            if (trackSettings.trackType === 'sample') {
+                if (typeof SampleEditor === 'undefined') continue;
+                const s = SampleEditor.getClipSample(sceneIndex, t);
+                if (!s || (!s.fullPath && !s.fileName)) continue;
+            } else {
+                if (!clip.notes || clip.notes.length === 0) continue;
+            }
+
+            tracksToStart.add(t);
+        }
+
+        const nothingActive = Object.keys(this.livePlayingClips).length === 0 &&
+                              Object.keys(this.liveQueuedClips).length === 0;
+        const timestamp = performance.now();
+
+        if (nothingActive) {
+            // No clips playing — start all scene clips immediately and anchor the grid
+            this.liveTransportStartTime = timestamp;
+            for (const track of tracksToStart) {
+                this.executeLiveClipStart(track, sceneIndex, track, /*seamless=*/false);
+            }
+        } else {
+            // Ensure the transport anchor is set
+            if (!this.liveTransportStartTime) {
+                this.liveTransportStartTime = timestamp;
+            }
+
+            // Queue stops for all playing tracks that won't be in the new scene
+            for (const trackIndex in this.livePlayingClips) {
+                const track = parseInt(trackIndex);
+                const playing = this.livePlayingClips[track];
+                if (playing.loopTimeout) clearTimeout(playing.loopTimeout);
+                if (!tracksToStart.has(track)) {
+                    this.liveQueuedClips[track] = { scene: playing.scene, track: playing.track, action: 'stop' };
+                    if (this.externalHandler) {
+                        if (playing.isSampleTrack) {
+                            this.externalHandler({ command: 'queueStopSample', payload: { trackIndex: track }, timestamp });
+                        } else {
+                            this.externalHandler({ command: 'queueLiveMidiStop', payload: { trackIndex: track }, timestamp });
+                        }
+                    }
+                }
+            }
+
+            // Cancel queued plays for tracks not in the new scene
+            for (const trackIndex in this.liveQueuedClips) {
+                const track = parseInt(trackIndex);
+                const queued = this.liveQueuedClips[track];
+                if (queued.action === 'play' && !tracksToStart.has(track)) {
+                    delete this.liveQueuedClips[track];
+                    if (this.externalHandler) {
+                        this.externalHandler({ command: 'cancelQueuedSample', payload: { trackIndex: track }, timestamp });
+                    }
+                }
+            }
+
+            // Queue starts for all tracks in the new scene at the next quantize boundary
+            for (const track of tracksToStart) {
+                this.liveQueuedClips[track] = { scene: sceneIndex, track: track, action: 'play' };
+                this._sendLiveClipToCpp(track, sceneIndex, /*seamless=*/true);
+            }
+        }
+
+        if (typeof SongScreen !== 'undefined') {
+            SongScreen.updateLiveClipStates();
+        }
+    },
+
     // Internal helper: send the JUCE commands for a live clip start without updating JS state.
     // Used when adding a non-first clip to the queue (JS state is updated by the UI loop instead).
     _sendLiveClipToCpp: function(trackIndex, sceneIndex, seamless) {
@@ -1026,71 +1109,25 @@ const AudioBridge = {
 
         // For toggle clip command, handle play/pause/resume logic
         if (command === 'toggleClip') {
-            // Check clipPaused first - JUCE may have set isPlaying=false when paused
             if (this.clipPaused) {
-                // Currently paused -> stop and restart from saved position
-                const resumePosition = this.clipPausedPosition || 0;
-
-                this.externalHandler({ command: 'setTempo', payload: { bpm: AppState.tempo || 120 }, timestamp });
-                this.externalHandler({ command: 'stopClip', payload: {}, timestamp });
-
-                const scene = AppState.currentScene;
-                const track = AppState.currentTrack;
-                const clip = AppState.getClip(scene, track);
-                const trackSettings = AppState.getTrackSettings(track);
-
-                if (trackSettings.trackType !== 'sample' && clip.notes && clip.notes.length > 0) {
-                    const clipLength = clip.length || AppState.currentLength;
-
-                    let notesInClip = clip.notes
-                        .filter(note => note.start < clipLength)
-                        .map(note => ({
-                            ...note,
-                            duration: Math.min(note.duration, clipLength - note.start)
-                        }));
-
-                    const adjustedNotes = notesInClip
-                        .filter(note => (note.start + note.duration) > resumePosition)
-                        .map(note => ({
-                            ...note,
-                            start: Math.max(0, note.start - resumePosition),
-                            duration: note.start < resumePosition
-                                ? note.duration - (resumePosition - note.start)
-                                : note.duration
-                        }));
-
-                    const remainingLength = clipLength - resumePosition;
-
-                    this.externalHandler({
-                        command: 'scheduleClip',
-                        payload: {
-                            trackIndex: track,
-                            sceneIndex: scene,
-                            notes: adjustedNotes,
-                            loopLength: remainingLength,
-                            loop: (clip.playMode || 'loop') === 'loop',
-                            program: trackSettings.midiProgram || 0,
-                            isDrum: trackSettings.isPercussion || false
-                        },
-                        timestamp
-                    });
-                }
-
-                this.externalHandler({ command: 'playClip', payload: {}, timestamp });
-
-                this.clipResumeOffset = resumePosition;
+                // Paused -> resume (C++ continues from where it stopped)
+                this.externalHandler({ command: 'resumeClip', payload: {}, timestamp });
                 this.clipPaused = false;
+                this.clipResumeOffset = 0;
                 this.isPlaying = true;
-                const clipLen = AppState.getClip(scene, track).length || AppState.currentLength;
-                const secPerStep = 60 / (AppState.tempo || 120) / 4;
-                const clipLoop = (AppState.getClip(scene, track).playMode || 'loop') === 'loop';
-                this.startPlayheadAnimation(clipLen, secPerStep, clipLoop);
+                const resumeScene = AppState.currentScene;
+                const resumeTrack = AppState.currentTrack;
+                const resumeClipData = AppState.getClip(resumeScene, resumeTrack);
+                const resumeLen = resumeClipData.length || AppState.currentLength;
+                const resumeSecPerStep = 60 / (AppState.tempo || 120) / 4;
+                const resumeLoop = (resumeClipData.playMode || 'loop') === 'loop';
+                this.startPlayheadAnimation(resumeLen, resumeSecPerStep, resumeLoop);
                 this.updatePlayButton(true, false);
                 this.updateSceneControlsState(true);
             } else if (this.isPlaying) {
-                // Currently playing -> stop and save position
+                // Playing -> pause (C++ holds position)
                 this.clipPausedPosition = this.playheadStep || 0;
-                this.externalHandler({ command: 'stopClip', payload: {}, timestamp });
+                this.externalHandler({ command: 'pauseClip', payload: { position: this.clipPausedPosition }, timestamp });
                 this.clipPaused = true;
                 this.updatePlayButton(true, true);
                 this.updateSceneControlsState(true);
@@ -1344,6 +1381,9 @@ const AudioBridge = {
         else if (command === 'queueLiveClip') {
             this.queueLiveClip(payload.sceneIndex, payload.trackIndex);
         }
+        else if (command === 'queueLiveScene') {
+            this.queueLiveScene(payload.sceneIndex);
+        }
         // All other commands pass through directly
         else {
             this.externalHandler({ command, payload, timestamp });
@@ -1372,24 +1412,42 @@ const AudioBridge = {
     /**
      * Helper: Start scene playback from a position
      */
-    _startScene(sceneIndex, startPosition, timestamp, infiniteLoop = false) {
+    _startScene(sceneIndex, startPosition, timestamp, infiniteLoop = false, seamless = false) {
         this._pendingPlayCommand = 'playScene';
         this._ensureSamplerInstrumentsLoaded();
 
-        // Debug: Log all stored samples
-        if (typeof SampleEditor !== 'undefined' && SampleEditor.clipSamples) {
-            console.log('[AudioBridge] _startScene - All stored samples:', Object.keys(SampleEditor.clipSamples));
-            for (const [key, sample] of Object.entries(SampleEditor.clipSamples)) {
-                if (sample && (sample.fullPath || sample.fileName)) {
-                    console.log('[AudioBridge]   Key:', key, '-> File:', sample.fullPath || sample.fileName);
+        // Send current tempo before starting playback
+        this.externalHandler({ command: 'setTempo', payload: { bpm: AppState.tempo || 120 }, timestamp });
+
+        // For seamless song transitions: pre-arm sample tracks BEFORE stopping the old scene.
+        // This queues the new file on the audio thread so it fires at the very next audio block
+        // after transport restarts, eliminating the gap between scenes.
+        if (seamless && typeof SampleEditor !== 'undefined') {
+            for (let track = 0; track < AppState.numTracks; track++) {
+                const clip = AppState.getClip(sceneIndex, track);
+                const trackSettings = AppState.getTrackSettings(track);
+                const mixerState = AppState.getMixerState(track);
+                if (mixerState.mute || clip.mute) continue;
+                if (trackSettings.trackType === 'sample') {
+                    const trackSample = SampleEditor.getClipSample(sceneIndex, track);
+                    if (trackSample && (trackSample.fullPath || trackSample.fileName)) {
+                        const filePath = trackSample.fullPath || trackSample.filePath || trackSample.fileName;
+                        const offset = trackSample.offset || 0;
+                        const loop = (clip.playMode || 'loop') === 'loop';
+                        const clipLength = clip.length || 64;
+                        // Pre-arm with seamless=true: queues the new file on the audio thread
+                        // so it fires at the very next block after transport restarts
+                        this.externalHandler({
+                            command: 'playSampleFile',
+                            payload: { trackIndex: track, filePath, offset, loop, loopLengthSteps: clipLength, seamless: true },
+                            timestamp
+                        });
+                    }
                 }
             }
         }
 
-        // IMPORTANT: Send current tempo before starting playback
-        this.externalHandler({ command: 'setTempo', payload: { bpm: AppState.tempo || 120 }, timestamp });
-
-        // First stop any existing playback and clear clips from previous scene
+        // Stop any existing playback and clear clips from previous scene
         this.externalHandler({ command: 'stopScene', payload: {}, timestamp });
         this.externalHandler({ command: 'clearAllClips', payload: {}, timestamp });
 
@@ -1400,9 +1458,14 @@ const AudioBridge = {
             const trackSettings = AppState.getTrackSettings(track);
 
             if (trackSettings.trackType === 'sample') {
-                // Sample tracks use clip length for looping
-                const clipLength = clip.length || 64;
-                maxLength = Math.max(maxLength, clipLength);
+                // Only count sample tracks that have an actual file
+                if (typeof SampleEditor !== 'undefined') {
+                    const trackSample = SampleEditor.getClipSample(sceneIndex, track);
+                    if (trackSample && (trackSample.fullPath || trackSample.fileName)) {
+                        const clipLength = clip.length || 64;
+                        maxLength = Math.max(maxLength, clipLength);
+                    }
+                }
             } else if (clip.notes && clip.notes.length > 0) {
                 // MIDI tracks
                 const clipLength = clip.length || 64;
@@ -1430,17 +1493,15 @@ const AudioBridge = {
 
             // Use track type to determine playback mode
             if (trackSettings.trackType === 'sample') {
+                // In seamless mode, sample tracks were already queued above — skip here
+                if (seamless) continue;
                 if (typeof SampleEditor !== 'undefined') {
                     const trackSample = SampleEditor.getClipSample(sceneIndex, track);
-                    console.log('[AudioBridge] Looking up sample for scene', sceneIndex, 'track', track,
-                                '-> key:', sceneIndex + '_' + track,
-                                '-> found:', trackSample ? (trackSample.fullPath || trackSample.fileName || 'no file') : 'null');
                     if (trackSample && (trackSample.fullPath || trackSample.fileName)) {
                         const filePath = trackSample.fullPath || trackSample.filePath || trackSample.fileName;
                         const offset = trackSample.offset || 0;
                         const loop = (clip.playMode || 'loop') === 'loop';
                         const clipLength = clip.length || 64;
-                        console.log('[AudioBridge] Playing sample - scene:', sceneIndex, 'track:', track, 'file:', filePath);
                         this.externalHandler({
                             command: 'playSampleFile',
                             payload: { trackIndex: track, filePath, offset, loop, loopLengthSteps: clipLength },
@@ -1539,141 +1600,193 @@ const AudioBridge = {
     },
 
     /**
-     * Helper: Start song playback from scene 0
+     * Helper: Start song playback.
+     * Scene timing is driven entirely by C++ (MidiBridge timer detects scene-end
+     * via audio thread signal and calls advanceSongScene).  JS only supplies
+     * clip data upfront and responds to 'sceneChanged' events for UI updates.
      */
     _playSong(timestamp) {
-        // Stop any current playback first
         this._stopSong(timestamp);
         this._pendingPlayCommand = 'playSong';
 
         this.isPlayingSong = true;
         this.songPaused = false;
-        this.currentSongScene = 0;
         this.updateSongPlayButton(true, false);
 
-        // Start playing from scene 0
-        this._playSongScene(0, timestamp);
+        // Find first scene with content
+        const firstScene = this._findNextSongScene(0);
+        if (firstScene < 0) {
+            this._stopSong(timestamp);
+            return;
+        }
+
+        this.currentSongScene = firstScene;
+
+        // Start scene (sends stopScene, clearAllClips, scheduleClip, playSampleFile, playScene)
+        this._startScene(firstScene, 0, timestamp, false, false);
+        this.isPlayingSong = true;
+        // _startScene sets sceneLength for JS-side end detection, but in song mode
+        // C++ drives scene transitions — disable the JS check to prevent premature stopScene()
+        this.sceneLength = 0;
+
+        // Tell C++ how long this scene lasts so it can detect the boundary
+        const durationBeats = this._calcSongSceneDurationBeats(firstScene);
+        this.send('setSongSceneDuration', { beats: durationBeats });
+
+        // Pre-queue the next scene so C++ can transition instantly
+        this._preQueueNextSongScene(firstScene + 1);
+
+        // Kick off playhead animation in looping mode
+        this._startSongPlayheadAnimation(firstScene);
     },
 
     /**
-     * Helper: Play a specific scene as part of song playback
+     * Helper: Calculate the total playback duration of a scene in beats.
+     * Accounts for per-clip repeat counts and the scene-level repeat setting.
      */
-    _playSongScene(sceneIndex, timestamp) {
-        if (!this.isPlayingSong || this.songPaused) return;
-
-        if (sceneIndex >= AppState.numScenes) {
-            // Song finished - stop
-            this._stopSong(timestamp);
-            return;
-        }
-
-        // Check if scene is empty (no notes and no sample tracks with files)
-        let hasContent = false;
-        for (let track = 0; track < AppState.numTracks; track++) {
-            const clip = AppState.getClip(sceneIndex, track);
-            const trackSettings = AppState.getTrackSettings(track);
-
-            if (trackSettings.trackType === 'sample') {
-                // Check if sample track has a file loaded for this clip
-                if (typeof SampleEditor !== 'undefined') {
-                    const trackSample = SampleEditor.getClipSample(sceneIndex, track);
-                    if (trackSample && (trackSample.fullPath || trackSample.fileName)) {
-                        hasContent = true;
-                        break;
-                    }
-                }
-            } else if (clip.notes && clip.notes.length > 0) {
-                hasContent = true;
-                break;
-            }
-        }
-
-        if (!hasContent) {
-            // Empty scene - stop the song
-            console.log('[AudioBridge] Empty scene encountered at', sceneIndex + 1, '- stopping song');
-            this._stopSong(timestamp);
-            return;
-        }
-
-        this.currentSongScene = sceneIndex;
-
-        // Use _startScene to play this scene (schedules clips to JUCE)
-        this._startScene(sceneIndex, 0, timestamp);
-
-        // Also set song-specific state
-        this.isPlayingSong = true;
-
-        // Calculate scene duration for timeout
-        const tempo = AppState.tempo || 120;
-        const secondsPerStep = 60 / tempo / 4;
-
-        // Get scene-level repeat count
+    _calcSongSceneDurationBeats(sceneIndex) {
         const sceneProps = AppState.getSceneProperties(sceneIndex);
         const sceneRepeat = sceneProps.repeat || 1;
 
-        // Calculate base loop length (without repeats) and total length (with clip repeats)
-        let baseLoopLength = 0;
-        let totalLength = 0;
+        let maxSteps = 0;
         for (let track = 0; track < AppState.numTracks; track++) {
             const clip = AppState.getClip(sceneIndex, track);
             const trackSettings = AppState.getTrackSettings(track);
+            const mixerState = AppState.getMixerState(track);
+            if (mixerState.mute || clip.mute) continue;
 
+            let clipSteps = clip.length || 64;
             if (trackSettings.trackType === 'sample') {
-                const clipLength = clip.length || 64;
-                baseLoopLength = Math.max(baseLoopLength, clipLength);
-                totalLength = Math.max(totalLength, clipLength);
-            } else if (clip.notes && clip.notes.length > 0) {
-                const clipLength = clip.length || 64;
+                // Only count sample tracks that have an actual file
+                if (typeof SampleEditor === 'undefined') continue;
+                const trackSample = SampleEditor.getClipSample(sceneIndex, track);
+                if (!trackSample || (!trackSample.fullPath && !trackSample.fileName)) continue;
+            } else {
+                // Only count MIDI tracks that have notes
+                if (!clip.notes || clip.notes.length === 0) continue;
                 const repeatCount = clip.repeat || 1;
-                baseLoopLength = Math.max(baseLoopLength, clipLength);
-                totalLength = Math.max(totalLength, clipLength * repeatCount);
+                clipSteps = clipSteps * repeatCount;
             }
-        }
-        baseLoopLength = Math.max(baseLoopLength, AppState.getMaxLengthInScene(sceneIndex));
-        totalLength = Math.max(totalLength, baseLoopLength);
-
-        // Apply scene-level repeat to total duration
-        totalLength = totalLength * sceneRepeat;
-
-        // Restart playhead animation with looping enabled for song mode
-        this.startPlayheadAnimation(baseLoopLength, secondsPerStep, true);
-
-        const sceneDuration = totalLength * secondsPerStep;
-
-        console.log('[AudioBridge] Playing song scene', sceneIndex + 1, 'duration:', sceneDuration.toFixed(2) + 's');
-
-        // Clear any existing song scene timeout
-        if (this._songSceneTimeout) {
-            clearTimeout(this._songSceneTimeout);
+            maxSteps = Math.max(maxSteps, clipSteps);
         }
 
-        // Schedule next scene after this one finishes
-        this._songSceneTimeout = setTimeout(() => {
-            if (this.isPlayingSong && !this.songPaused) {
-                // Stop current scene's clips
-                this.externalHandler({ command: 'stopScene', payload: {}, timestamp: performance.now() });
-
-                // Play next scene
-                this._playSongScene(sceneIndex + 1, performance.now());
-            }
-        }, (sceneDuration + 0.2) * 1000);
+        return (maxSteps * sceneRepeat) / 4.0;  // steps → beats
     },
 
     /**
-     * Helper: Stop song playback
+     * Helper: Find the next scene index (>= startIndex) that has playable content.
+     * Returns -1 if no such scene exists.
+     */
+    _findNextSongScene(startIndex) {
+        for (let s = startIndex; s < AppState.numScenes; s++) {
+            for (let t = 0; t < AppState.numTracks; t++) {
+                const clip = AppState.getClip(s, t);
+                const trackSettings = AppState.getTrackSettings(t);
+                const mixerState = AppState.getMixerState(t);
+                if (mixerState.mute || clip.mute) continue;
+
+                if (trackSettings.trackType === 'sample') {
+                    if (typeof SampleEditor !== 'undefined') {
+                        const trackSample = SampleEditor.getClipSample(s, t);
+                        if (trackSample && (trackSample.fullPath || trackSample.fileName))
+                            return s;
+                    }
+                } else if (clip.notes && clip.notes.length > 0) {
+                    return s;
+                }
+            }
+        }
+        return -1;
+    },
+
+    /**
+     * Pre-queue the next scene's data to C++ so the scene transition is instant
+     * when the audio thread fires the scene-end event.
+     * Called at song start (for scene 1) and after each 'sceneChanged' event.
+     */
+    _preQueueNextSongScene(nextSceneIndex) {
+        const sceneIndex = this._findNextSongScene(nextSceneIndex);
+
+        if (sceneIndex < 0) {
+            // No more scenes — C++ will call songSceneChangedCallback(-1) to signal end
+            return;
+        }
+
+        const midiClips = [];
+        const sampleFiles = [];
+        const timestamp = performance.now();
+
+        for (let track = 0; track < AppState.numTracks; track++) {
+            const clip = AppState.getClip(sceneIndex, track);
+            const trackSettings = AppState.getTrackSettings(track);
+            const mixerState = AppState.getMixerState(track);
+            if (mixerState.mute || clip.mute) continue;
+
+            if (trackSettings.trackType === 'sample') {
+                if (typeof SampleEditor !== 'undefined') {
+                    const trackSample = SampleEditor.getClipSample(sceneIndex, track);
+                    if (trackSample && (trackSample.fullPath || trackSample.fileName)) {
+                        const filePath = trackSample.fullPath || trackSample.filePath || trackSample.fileName;
+                        sampleFiles.push({
+                            trackIndex: track,
+                            filePath,
+                            offset: trackSample.offset || 0,
+                            loop: (clip.playMode || 'loop') === 'loop',
+                            loopLengthBeats: (clip.length || 64) / 4.0
+                        });
+                    }
+                }
+            } else if (clip.notes && clip.notes.length > 0) {
+                const clipLength = clip.length || AppState.currentLength;
+                const notesToSchedule = clip.notes
+                    .filter(n => n.start < clipLength)
+                    .map(n => ({
+                        ...n,
+                        duration: Math.min(n.duration, clipLength - n.start)
+                    }));
+                midiClips.push({
+                    trackIndex: track,
+                    notes: notesToSchedule,
+                    loopLength: clipLength,
+                    loop: (clip.playMode || 'loop') === 'loop',
+                    program: trackSettings.midiProgram || 0,
+                    isDrum: trackSettings.isPercussion || false
+                });
+            }
+        }
+
+        const durationBeats = this._calcSongSceneDurationBeats(sceneIndex);
+
+        this.send('preQueueSongScene', {
+            sceneIndex,
+            midiClips,
+            sampleFiles,
+            durationBeats
+        });
+    },
+
+    /**
+     * Helper: Start playhead animation for a song scene (looping mode).
+     */
+    _startSongPlayheadAnimation(sceneIndex) {
+        const tempo = AppState.tempo || 120;
+        const secondsPerStep = 60 / tempo / 4;
+        const baseLoopLength = AppState.getMaxLengthInScene(sceneIndex);
+        this.startPlayheadAnimation(baseLoopLength, secondsPerStep, true);
+    },
+
+    /**
+     * Helper: Stop song playback.
      */
     _stopSong(timestamp) {
         this._pendingPlayCommand = null;
-        // Clear song scene timeout
-        if (this._songSceneTimeout) {
-            clearTimeout(this._songSceneTimeout);
-            this._songSceneTimeout = null;
+
+        // Tell C++ to clear song mode state
+        if (this.externalHandler) {
+            this.externalHandler({ command: 'stopSongMode', payload: {}, timestamp });
+            this.externalHandler({ command: 'stopScene', payload: {}, timestamp });
         }
 
-        // Stop the current scene
-        this.externalHandler({ command: 'stopScene', payload: {}, timestamp });
-
-        // Reset all song state
         this.isPlayingSong = false;
         this.songPaused = false;
         this.currentSongScene = 0;
@@ -1690,16 +1803,10 @@ const AudioBridge = {
     },
 
     /**
-     * Helper: Pause song playback
+     * Helper: Pause song playback.
      */
     _pauseSong(timestamp) {
-        // Clear song scene timeout
-        if (this._songSceneTimeout) {
-            clearTimeout(this._songSceneTimeout);
-            this._songSceneTimeout = null;
-        }
-
-        // Pause the current scene
+        this.externalHandler({ command: 'stopSongMode', payload: {}, timestamp });
         this.externalHandler({ command: 'stopScene', payload: {}, timestamp });
 
         this.songPaused = true;
@@ -1710,19 +1817,22 @@ const AudioBridge = {
     },
 
     /**
-     * Helper: Resume song playback from paused position
+     * Helper: Resume song playback from the current scene (restarts from beat 0).
      */
     _resumeSong(timestamp) {
         this.songPaused = false;
         this.updateSongPlayButton(true, false);
 
-        // Resume from the current song scene
         const sceneIndex = this.currentSongScene || 0;
-        this._playSongScene(sceneIndex, timestamp);
-    },
+        this._startScene(sceneIndex, 0, timestamp, false, false);
+        this.isPlayingSong = true;
+        this.sceneLength = 0;  // C++ drives scene end in song mode
 
-    // Song scene timeout reference
-    _songSceneTimeout: null,
+        const durationBeats = this._calcSongSceneDurationBeats(sceneIndex);
+        this.send('setSongSceneDuration', { beats: durationBeats });
+        this._preQueueNextSongScene(sceneIndex + 1);
+        this._startSongPlayheadAnimation(sceneIndex);
+    },
 
     // ==========================================
     // High-Level API (called by UI components)
@@ -1863,8 +1973,7 @@ const AudioBridge = {
      */
     getGraphState() {
         return new Promise((resolve, reject) => {
-            if (!this.isExternalMode()) {
-                // Not in external mode, return empty state
+            if (!this.externalHandler) {
                 resolve({ graphXml: '', trackInstrumentNodes: {} });
                 return;
             }
@@ -1892,10 +2001,7 @@ const AudioBridge = {
      * @param {object} trackInstrumentNodes - Mapping of track index to node ID
      */
     setGraphState(graphXml, trackInstrumentNodes = {}) {
-        if (!this.isExternalMode()) {
-            console.log('[AudioBridge] Not in external mode, skipping setGraphState');
-            return;
-        }
+        if (!this.externalHandler) return;
 
         this.send('setGraphState', {
             graphXml: graphXml,
@@ -1908,10 +2014,6 @@ const AudioBridge = {
      * @param {number} trackIndex - Track index
      */
     getPluginParameters(trackIndex) {
-        if (!this.isExternalMode()) {
-            return;
-        }
-
         this.send('getPluginParameters', { trackIndex });
     },
 
@@ -1919,30 +2021,15 @@ const AudioBridge = {
     // External Renderer Integration
     // ==========================================
 
+    /** Returns true when connected to the JUCE host */
+    isExternalMode() { return !!this.externalHandler; },
+
     /**
-     * Connect to an external audio renderer (e.g., JUCE plugin host)
+     * Connect to the JUCE host
      * @param {function} handler - Function to receive audio commands
      */
     connectExternal(handler) {
-        this.mode = 'external';
         this.externalHandler = handler;
-        console.log('[AudioBridge] Connected to external renderer');
-    },
-
-    /**
-     * Disconnect from external renderer and revert to internal Web Audio
-     */
-    disconnectExternal() {
-        this.mode = 'internal';
-        this.externalHandler = null;
-        console.log('[AudioBridge] Disconnected from external renderer, using internal Web Audio');
-    },
-
-    /**
-     * Check if connected to an external renderer
-     */
-    isExternalMode() {
-        return this.mode === 'external' && this.externalHandler !== null;
     },
 
     /**
@@ -1974,9 +2061,6 @@ const AudioBridge = {
 
                         // Check if scene has reached the end (including repeats)
                         if (this.sceneLength && position >= this.sceneLength) {
-                            console.log('[AudioBridge] Scene reached end (after ' +
-                                (this.sceneIterationLength > 0 ? Math.round(this.sceneLength / this.sceneIterationLength) : 1) +
-                                ' repeat(s)), stopping playback');
                             this.stopScene();
                         } else {
                             // Wrap playhead within single iteration for UI display
@@ -2092,12 +2176,18 @@ const AudioBridge = {
             case 'meterUpdate':
                 // External renderer sends level meter data
                 if (typeof AppState !== 'undefined' && message.trackIndex !== undefined) {
-                    const state = AppState.getMixerState(message.trackIndex);
-                    state.levelL = message.levelL;
-                    state.levelR = message.levelR;
-
-                    // Update mixer UI level meters if visible
-                    this.updateMixerLevelMeter(message.trackIndex, message.levelL, message.levelR);
+                    if (message.trackIndex === -1) {
+                        // Master mixer meter
+                        AppState.masterMixerState.levelL = message.levelL;
+                        AppState.masterMixerState.levelR = message.levelR;
+                        this.updateMixerLevelMeter(-1, message.levelL, message.levelR);
+                    } else {
+                        const state = AppState.getMixerState(message.trackIndex);
+                        state.levelL = message.levelL;
+                        state.levelR = message.levelR;
+                        // Update mixer UI level meters if visible
+                        this.updateMixerLevelMeter(message.trackIndex, message.levelL, message.levelR);
+                    }
                 }
                 break;
 
@@ -2143,6 +2233,23 @@ const AudioBridge = {
                 }
                 break;
 
+            case 'drumSampleSelected':
+                // JUCE notifies JS that a drum sample was copied to drumkit/ folder and loaded
+                if (typeof AppState !== 'undefined') {
+                    AppState.setDrumKitSample(
+                        message.trackIndex,
+                        message.noteNumber,
+                        message.filePath,
+                        message.fileName
+                    );
+                }
+                // Refresh the clip editor piano keys if it's showing this track
+                if (typeof ClipEditor !== 'undefined' &&
+                    AppState.currentTrack === message.trackIndex) {
+                    ClipEditor.renderPianoKeys();
+                }
+                break;
+
             case 'pluginParameters':
                 // JUCE sends automatable parameters for a plugin
                 console.log('[AudioBridge] Received plugin parameters for track', message.trackIndex,
@@ -2163,6 +2270,33 @@ const AudioBridge = {
                     ClipEditor.onPluginParametersReceived(message.trackIndex, message);
                 }
                 break;
+
+            case 'sceneChanged': {
+                // C++ advanced to the next scene (or song ended when sceneIndex == -1).
+                // JS updates UI and pre-queues the scene after this one.
+                const newScene = message.sceneIndex;
+                if (newScene < 0) {
+                    // Song finished naturally
+                    this._stopSong(performance.now());
+                } else if (this.isPlayingSong && !this.songPaused) {
+                    this.currentSongScene = newScene;
+                    // Update playingSceneIndex so ClipEditor and SongScreen
+                    // draw the playhead in the correct scene row
+                    this.playingSceneIndex = newScene;
+                    // Update iteration length so timingUpdate wraps correctly
+                    this.sceneIterationLength = AppState.getMaxLengthInScene(newScene);
+                    // Disable JS-side scene-end detection — C++ drives it in song mode
+                    this.sceneLength = 0;
+                    // Reset playhead to start of new scene
+                    this.playheadStep = 0;
+                    if (typeof SongScreen !== 'undefined')
+                        SongScreen.highlightPlayingScene(newScene);
+                    this._startSongPlayheadAnimation(newScene);
+                    // Pre-queue the scene after this one
+                    this._preQueueNextSongScene(newScene + 1);
+                }
+                break;
+            }
 
             default:
                 console.warn('[AudioBridge] Unknown external message type:', message.type);
@@ -2213,7 +2347,7 @@ const AudioBridge = {
      * Call this when volume, pan, mute, or solo changes
      */
     updateTrackMixerState(trackIndex) {
-        if (this.mode !== 'external') return;
+        if (!this.externalHandler) return;
 
         const mixerState = AppState.getMixerState(trackIndex);
         this.send('setTrackMixerState', {
@@ -2222,6 +2356,21 @@ const AudioBridge = {
             pan: mixerState.pan,
             mute: mixerState.mute,
             solo: mixerState.solo
+        });
+    },
+
+    /**
+     * Send master mixer state update to JUCE
+     * Call this when master volume, pan, or mute changes
+     */
+    updateMasterMixerState() {
+        if (!this.externalHandler) return;
+
+        const state = AppState.masterMixerState;
+        this.send('setMasterMixerState', {
+            volume: state.volume,
+            pan: state.pan,
+            mute: state.mute
         });
     },
 
@@ -2244,9 +2393,10 @@ const AudioBridge = {
      * @param {number} levelR - Right channel level (0-1)
      */
     updateMixerLevelMeter(trackIndex, levelL, levelR) {
-        // Update song mixer level meters (in mixer tab)
-        const songLevelL = document.getElementById(`songLevelL-${trackIndex}`);
-        const songLevelR = document.getElementById(`songLevelR-${trackIndex}`);
+        // trackIndex = -1 means the master mixer strip
+        const suffix = trackIndex === -1 ? 'master' : trackIndex;
+        const songLevelL = document.getElementById(`songLevelL-${suffix}`);
+        const songLevelR = document.getElementById(`songLevelR-${suffix}`);
 
         if (songLevelL) {
             songLevelL.style.height = `${Math.min(levelL * 100, 100)}%`;
@@ -2261,8 +2411,7 @@ const AudioBridge = {
      */
     log(...args) {
         const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-        console.log('[AudioBridge]', message);
-        if (this.mode === 'external') {
+        if (this.externalHandler) {
             this.send('debugLog', { message });
         }
     },
@@ -2312,19 +2461,6 @@ const AudioBridge = {
                 window.audioBridgeCommand(msg);
             });
 
-            /*
-            // Expose global function for JUCE to call (for receiving messages from C++)
-            // This was used in eval JS in juce Not used now we use Events now.
-            window.AudioBridgeReceive = (msgString) => {
-                try {
-                    const msg = JSON.parse(msgString);
-                    this.receiveFromExternal(msg);
-                } catch (e) {
-                    console.error('[AudioBridge] Failed to parse JUCE message:', e);
-                }
-            };
-            */
-
             const state = this.getProjectState();
             if (state) {
                 this.send('syncProjectState', state);
@@ -2335,33 +2471,6 @@ const AudioBridge = {
         } else {
             console.log('[AudioBridge] ✗ audioBridgeCommand NOT FOUND');
         }
-
-        /*
-        // Legacy: Direct bridge object (for compatibility)
-        if (typeof window !== 'undefined' && window.juceBridge) {
-            this.connectExternal((msg) => {
-                window.juceBridge.postMessage(JSON.stringify(msg));
-            });
-
-            if (window.juceBridge.onMessage) {
-                window.juceBridge.onMessage = (msgString) => {
-                    try {
-                        const msg = JSON.parse(msgString);
-                        this.receiveFromExternal(msg);
-                    } catch (e) {
-                        console.error('[AudioBridge] Failed to parse JUCE message:', e);
-                    }
-                };
-            }
-
-            const state = this.getProjectState();
-            if (state) {
-                this.send('syncProjectState', state);
-            }
-
-            return true;
-        }
-            */
 
         return false;
     }

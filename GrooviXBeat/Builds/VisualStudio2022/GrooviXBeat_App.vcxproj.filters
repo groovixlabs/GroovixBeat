@@ -748,6 +748,9 @@
     <ClCompile Include="..\..\Source\Plugins\ARAPlugin.cpp">
       <Filter>GrooviXBeat\Source\Plugins</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Source\Plugins\DrumKitPlugin.cpp">
+      <Filter>GrooviXBeat\Source\Plugins</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Source\Plugins\InternalPlugins.cpp">
       <Filter>GrooviXBeat\Source\Plugins</Filter>
     </ClCompile>
@@ -768,6 +771,9 @@
     </ClCompile>
     <ClCompile Include="..\..\Source\Plugins\TrackMixerPlugin.cpp">
       <Filter>GrooviXBeat\Source\Plugins</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Source\Sequencer\DrumKitManager.cpp">
+      <Filter>GrooviXBeat\Source\Sequencer</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Source\Sequencer\MidiBridge.cpp">
       <Filter>GrooviXBeat\Source\Sequencer</Filter>
@@ -3909,6 +3915,9 @@
     <ClInclude Include="..\..\Source\Plugins\ARAPlugin.h">
       <Filter>GrooviXBeat\Source\Plugins</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\Source\Plugins\DrumKitPlugin.h">
+      <Filter>GrooviXBeat\Source\Plugins</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\Source\Plugins\InternalPlugins.h">
       <Filter>GrooviXBeat\Source\Plugins</Filter>
     </ClInclude>
@@ -3929,6 +3938,9 @@
     </ClInclude>
     <ClInclude Include="..\..\Source\Plugins\TrackMixerPlugin.h">
       <Filter>GrooviXBeat\Source\Plugins</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Source\Sequencer\DrumKitManager.h">
+      <Filter>GrooviXBeat\Source\Sequencer</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Source\Sequencer\MidiBridge.h">
       <Filter>GrooviXBeat\Source\Sequencer</Filter>

@@ -199,9 +199,9 @@
   color: #d5a865;
 }
 
-#GNotesWizardText , #ChordMelodyWizardText
+#GNotesWizardText , #ChordMelodyWizardText , #GNotesWizardHelpFrame
 {
-  width: 400px;
+  width: 450px;
   height: 200px;
   background: #242424; /* Neutral background for the button */
   color: #d5a865;

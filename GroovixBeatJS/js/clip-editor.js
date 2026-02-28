@@ -219,6 +219,8 @@ const ClipEditor = {
             AppState.setTrackSettings(trackIndex, { trackType: 'sample' });
         } else if (mode === 'sampled_instrument') {
             AppState.setTrackSettings(trackIndex, { trackType: 'sampled_instrument' });
+        } else if (mode === 'drum_kit') {
+            AppState.setTrackSettings(trackIndex, { trackType: 'drum_kit' });
         } else {
             AppState.setTrackSettings(trackIndex, { trackType: 'melody' });
         }
@@ -815,6 +817,41 @@ const ClipEditor = {
             this.gridCanvas.addEventListener('contextmenu', this.boundContextMenu);
             this.gridCanvas.addEventListener('wheel', this.boundPianoRollWheel, { passive: false });
 
+            // Piano keys canvas: click to assign sample in drum_kit mode
+            this.keysCanvas.addEventListener('click', (e) => {
+                const trackSettings = AppState.getTrackSettings(AppState.currentTrack);
+                if (trackSettings.trackType !== 'drum_kit') return;
+
+                const rect = this.keysCanvas.getBoundingClientRect();
+                const relY  = e.clientY - rect.top;
+                const rowIndex = Math.floor(relY / AppState.NOTE_HEIGHT);
+                const pitch = AppState.BASE_NOTE + (AppState.TOTAL_NOTES - 1 - rowIndex);
+
+                if (pitch >= AppState.BASE_NOTE && pitch < AppState.BASE_NOTE + AppState.TOTAL_NOTES) {
+                    this.openDrumSamplePicker(AppState.currentTrack, pitch);
+                }
+            });
+
+            // Right-click on piano keys in drum_kit mode: clear the sample
+            this.keysCanvas.addEventListener('contextmenu', (e) => {
+                const trackSettings = AppState.getTrackSettings(AppState.currentTrack);
+                if (trackSettings.trackType !== 'drum_kit') return;
+                e.preventDefault();
+
+                const rect = this.keysCanvas.getBoundingClientRect();
+                const rowIndex = Math.floor((e.clientY - rect.top) / AppState.NOTE_HEIGHT);
+                const pitch = AppState.BASE_NOTE + (AppState.TOTAL_NOTES - 1 - rowIndex);
+
+                AppState.clearDrumKitSample(AppState.currentTrack, pitch);
+                if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
+                    AudioBridge.send('clearDrumKitSample', {
+                        trackIndex: AppState.currentTrack,
+                        noteNumber: pitch
+                    });
+                }
+                this.renderPianoKeys();
+            });
+
             this.listenersAttached = true;
         }
     },
@@ -897,57 +934,84 @@ const ClipEditor = {
     renderPianoKeys: function() {
         const ctx = this.keysCtx;
         const canvas = this.keysCanvas;
-        const isPercussion = this.isPercussionTrack(AppState.currentTrack);
-        const trackScale = this.getTrackScale(AppState.currentTrack);
+        const trackSettings = AppState.getTrackSettings(AppState.currentTrack);
+        const isDrumKit    = trackSettings.trackType === 'drum_kit';
+        const isPercussion = isDrumKit || this.isPercussionTrack(AppState.currentTrack);
+        const trackScale   = this.getTrackScale(AppState.currentTrack);
         const hideNonScaleNotes = trackScale.hideNotesNotInScale && !isPercussion;
 
-        // Get visible pitches
         const visiblePitches = hideNonScaleNotes ? this.getVisiblePitches(AppState.currentTrack) : null;
-        const totalHeight = hideNonScaleNotes ? visiblePitches.length * AppState.NOTE_HEIGHT : AppState.TOTAL_NOTES * AppState.NOTE_HEIGHT;
+        const totalHeight = hideNonScaleNotes
+            ? visiblePitches.length * AppState.NOTE_HEIGHT
+            : AppState.TOTAL_NOTES * AppState.NOTE_HEIGHT;
 
-        // Update canvas height if needed
-        if (canvas.height !== totalHeight) {
-            canvas.height = totalHeight;
-        }
+        if (canvas.height !== totalHeight) canvas.height = totalHeight;
 
         ctx.fillStyle = '#1a1a1a';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const drumMapping = isDrumKit ? AppState.getDrumKitMapping(AppState.currentTrack) : null;
 
         let rowIndex = 0;
         for (let i = 0; i < AppState.TOTAL_NOTES; i++) {
             const pitch = AppState.BASE_NOTE + (AppState.TOTAL_NOTES - 1 - i);
 
-            // Skip non-visible pitches when hiding
-            if (hideNonScaleNotes && !this.isPitchVisible(pitch, AppState.currentTrack)) {
-                continue;
-            }
+            if (hideNonScaleNotes && !this.isPitchVisible(pitch, AppState.currentTrack)) continue;
 
             const y = rowIndex * AppState.NOTE_HEIGHT;
             const isBlack = AppState.isBlackKey(pitch);
             rowIndex++;
 
-            if (isPercussion) {
-                // Percussion mode - show drum names, no scale highlighting
-                const hasDrumName = this.DRUM_NAMES[pitch] !== undefined;
+            if (isDrumKit) {
+                // --- Drum Kit mode: show drum name + sample assignment indicator ---
+                const hasDrumName  = this.DRUM_NAMES[pitch] !== undefined;
+                const sampleInfo   = drumMapping[pitch];
+                const hasSample    = sampleInfo && sampleInfo.filePath;
 
-                // Key background - highlight rows with drum names
-                if (hasDrumName) {
-                    ctx.fillStyle = '#3a3a3a';
+                // Row background: gold tint if sample assigned, highlighted if named drum
+                if (hasSample) {
+                    ctx.fillStyle = '#3a2e1a';  // warm gold tint
+                } else if (hasDrumName) {
+                    ctx.fillStyle = '#2e2e2e';
                 } else {
-                    ctx.fillStyle = '#2a2a2a';
+                    ctx.fillStyle = '#242424';
                 }
                 ctx.fillRect(0, y, AppState.PIANO_KEY_WIDTH - 1, AppState.NOTE_HEIGHT - 1);
 
-                // Key label - show drum name or MIDI note
-                ctx.fillStyle = hasDrumName ? '#ddd' : '#666';
-                ctx.font = hasDrumName ? '9px sans-serif' : '10px sans-serif';
+                // Left accent bar: gold for assigned sample, dimmer for named drum
+                if (hasSample) {
+                    ctx.fillStyle = '#d5a865';
+                    ctx.fillRect(0, y + 1, 4, AppState.NOTE_HEIGHT - 3);
+                } else if ([36, 38, 42, 46, 49].includes(pitch)) {
+                    ctx.fillStyle = '#665533';
+                    ctx.fillRect(0, y + 1, 3, AppState.NOTE_HEIGHT - 3);
+                }
+
+                // Always show drum name; gold when sample assigned, dimmer otherwise
+                ctx.fillStyle = hasSample ? '#d5a865' : (hasDrumName ? '#aaa' : '#555');
+                ctx.font = '9px sans-serif';
                 ctx.textAlign = 'right';
                 ctx.textBaseline = 'middle';
-                const label = this.getDrumName(pitch);
-                ctx.fillText(label, AppState.PIANO_KEY_WIDTH - 5, y + AppState.NOTE_HEIGHT / 2);
+                ctx.fillText(this.getDrumName(pitch), AppState.PIANO_KEY_WIDTH - 5, y + AppState.NOTE_HEIGHT / 2);
 
-                // Highlight common drum sounds with left marker
-                if ([36, 38, 42, 46, 49].includes(pitch)) { // Kick, Snare, Closed HH, Open HH, Crash
+                // Small "+" icon hint on hover area — just a subtle right-edge indicator
+                ctx.fillStyle = '#3a3a3a';
+                ctx.fillRect(AppState.PIANO_KEY_WIDTH - 4, y + 1, 3, AppState.NOTE_HEIGHT - 3);
+
+            } else if (isPercussion) {
+                // Percussion mode - show drum names, no scale highlighting
+                const hasDrumName = this.DRUM_NAMES[pitch] !== undefined;
+
+                ctx.fillStyle = hasDrumName ? '#3a3a3a' : '#2a2a2a';
+                ctx.fillRect(0, y, AppState.PIANO_KEY_WIDTH - 1, AppState.NOTE_HEIGHT - 1);
+
+                ctx.fillStyle = hasDrumName ? '#ddd' : '#666';
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.getDrumName(pitch), AppState.PIANO_KEY_WIDTH - 5, y + AppState.NOTE_HEIGHT / 2);
+
+                if ([36, 38, 42, 46, 49].includes(pitch)) {
                     ctx.fillStyle = '#d5a865';
                     ctx.fillRect(0, y + 1, 3, AppState.NOTE_HEIGHT - 3);
                 }
@@ -955,7 +1019,6 @@ const ClipEditor = {
                 // Melody mode - show note names with scale highlighting
                 const inScale = this.isPitchInScale(pitch, AppState.currentTrack);
 
-                // Key background - reddish tint if out of scale (only when not hiding)
                 if (!hideNonScaleNotes && !inScale) {
                     ctx.fillStyle = isBlack ? '#3d2525' : '#4a3030';
                 } else {
@@ -963,32 +1026,33 @@ const ClipEditor = {
                 }
                 ctx.fillRect(0, y, AppState.PIANO_KEY_WIDTH - 1, AppState.NOTE_HEIGHT - 1);
 
-                // Key label - dimmer and reddish if out of scale (only when not hiding)
-                if (!hideNonScaleNotes && !inScale) {
-                    ctx.fillStyle = '#805050';
-                } else {
-                    ctx.fillStyle = isBlack ? '#bbb' : '#ddd';
-                }
+                ctx.fillStyle = (!hideNonScaleNotes && !inScale) ? '#805050' : (isBlack ? '#bbb' : '#ddd');
                 ctx.font = '10px sans-serif';
                 ctx.textAlign = 'right';
                 ctx.textBaseline = 'middle';
                 ctx.fillText(AppState.getNoteName(pitch), AppState.PIANO_KEY_WIDTH - 5, y + AppState.NOTE_HEIGHT / 2);
 
-                // Get track scale for root note highlighting
                 const isRootNote = trackScale.scale !== 'none' && pitch % 12 === trackScale.root;
-
-                // Highlight C notes with left marker
                 if (pitch % 12 === 0) {
                     ctx.fillStyle = (!hideNonScaleNotes && !inScale) ? '#665530' : '#d5a865';
                     ctx.fillRect(0, y + 1, 3, AppState.NOTE_HEIGHT - 3);
                 }
-
-                // Highlight root note of selected scale with a left marker (wider than C marker)
                 if (isRootNote) {
                     ctx.fillStyle = '#d5a865';
                     ctx.fillRect(0, y + 1, 5, AppState.NOTE_HEIGHT - 3);
                 }
             }
+        }
+
+        // Update cursor style: pointer in drum_kit mode to indicate clickability
+        canvas.style.cursor = isDrumKit ? 'pointer' : 'default';
+    },
+
+    // Open the drum sample picker for a specific note (drum_kit mode)
+    // Uses the same JUCE sample file browser as the sample editor
+    openDrumSamplePicker: function(trackIndex, noteNumber) {
+        if (typeof SampleEditor !== 'undefined') {
+            SampleEditor.openJuceFileBrowserForDrumKit(trackIndex, noteNumber);
         }
     },
 
@@ -1001,7 +1065,9 @@ const ClipEditor = {
     renderPianoGrid: function() {
         const ctx = this.gridCtx;
         const stepWidth = this.getZoomedStepWidth();
-        const isPercussion = this.isPercussionTrack(AppState.currentTrack);
+        const trackSettings = AppState.getTrackSettings(AppState.currentTrack);
+        const isDrumKit = trackSettings.trackType === 'drum_kit';
+        const isPercussion = isDrumKit || this.isPercussionTrack(AppState.currentTrack);
         const trackScale = this.getTrackScale(AppState.currentTrack);
         const hideNonScaleNotes = trackScale.hideNotesNotInScale && !isPercussion;
 
@@ -2508,11 +2574,11 @@ const ClipEditor = {
                     e.preventDefault();
                     this.showTrackSettings(AppState.currentTrack);
                 } else if (e.key === 'w' || e.key === 'W') {
-                    // Cycle through track types: melody -> sample -> sampled_instrument -> melody
+                    // Cycle through track types: melody -> sample -> sampled_instrument -> drum_kit -> melody
                     e.preventDefault();
                     const trackSettings = AppState.getTrackSettings(AppState.currentTrack);
                     const currentType = trackSettings.trackType || 'melody';
-                    const modes = ['melody', 'sample', 'sampled_instrument'];
+                    const modes = ['melody', 'sample', 'sampled_instrument', 'drum_kit'];
                     const currentIndex = modes.indexOf(currentType);
                     const nextMode = modes[(currentIndex + 1) % modes.length];
                     this.handleTrackTypeChange(nextMode);
@@ -2674,14 +2740,14 @@ const ClipEditor = {
 
         // Populate percussion checkbox
         percussionCheckbox.checked = trackSettings.isPercussion || false;
-        // Show percussion checkbox for melody and sampled_instrument, hide for sample
-        const showPercussion = trackMode !== 'sample';
+        // Show percussion checkbox for melody and sampled_instrument, hide for sample/drum_kit
+        const showPercussion = trackMode !== 'sample' && trackMode !== 'drum_kit';
         percussionRow.style.display = showPercussion ? 'flex' : 'none';
 
         // Show/hide settings based on track type and percussion state
         const showScaleSettings = (trackMode === 'melody' || trackMode === 'sampled_instrument') && !percussionCheckbox.checked;
         scaleSettingsRow.style.display = showScaleSettings ? 'flex' : 'none';
-        
+
         // Playback mode is available for all clip types
         trackPlaybackRow.style.display = 'flex';
 
@@ -2689,6 +2755,7 @@ const ClipEditor = {
         const isMelody = trackMode === 'melody';
         const isSamplerInstrument = trackMode === 'sampled_instrument';
         const isSample = trackMode === 'sample';
+        const isDrumKit = trackMode === 'drum_kit';
         samplerInstrumentRow.style.display = isSamplerInstrument ? 'flex' : 'none';
         const midiChannelRow = document.getElementById('midiChannelRow');
         if (midiChannelRow) midiChannelRow.style.display = isMelody ? 'flex' : 'none';
@@ -2767,16 +2834,18 @@ const ClipEditor = {
                 const percussionRow = document.getElementById('trackPercussionRow');
                 const trackType = e.target.value;
                 const percCheckbox = document.getElementById('trackPercussionCheckbox');
-                const showScaleSettings = (trackType === 'melody' || trackType === 'sampled_instrument') && !(percCheckbox && percCheckbox.checked);
-                scaleSettingsRow.style.display = showScaleSettings ? 'flex' : 'none';
-                
-                // Show percussion checkbox for melody and sampled_instrument, hide for sample
-                if (percussionRow) {
-                    percussionRow.style.display = trackType !== 'sample' ? 'flex' : 'none';
-                }
-
                 const isMelody = trackType === 'melody';
                 const isSamplerInstrument = trackType === 'sampled_instrument';
+                const isDrumKit = trackType === 'drum_kit';
+
+                const showScaleSettings = (trackType === 'melody' || trackType === 'sampled_instrument') && !(percCheckbox && percCheckbox.checked);
+                scaleSettingsRow.style.display = showScaleSettings ? 'flex' : 'none';
+
+                // Show percussion checkbox for melody and sampled_instrument only
+                if (percussionRow) {
+                    percussionRow.style.display = (trackType !== 'sample' && !isDrumKit) ? 'flex' : 'none';
+                }
+
                 samplerInstrumentRow.style.display = isSamplerInstrument ? 'flex' : 'none';
                 const midiChannelRow = document.getElementById('midiChannelRow');
                 if (midiChannelRow) midiChannelRow.style.display = isMelody ? 'flex' : 'none';
@@ -2876,20 +2945,33 @@ const ClipEditor = {
         // Build track settings update
         const settingsUpdate = {
             trackType: trackMode,
-            isPercussion: trackMode !== 'sample' ? percussionCheckbox.checked : false,
+            // drum_kit doesn't have a percussion checkbox (it's always treated as percussion)
+            isPercussion: (trackMode !== 'sample' && trackMode !== 'drum_kit') ? percussionCheckbox.checked : false,
             midiChannel: parseInt(channelSelect.value, 10),
             midiProgram: parseInt(instrumentSelect.value, 10)
         };
 
-        // If sampled_instrument, store the selected instrument name and send to JUCE
+        // If sampled_instrument, store the selected instrument name and send to JUCE.
+        // Always send the command (even with empty name) so JUCE can re-wire the audio
+        // graph connections for the sampler, which may have been disconnected by a
+        // previous VST instrument assignment.
         if (trackMode === 'sampled_instrument' && samplerInstrumentSelect) {
             const instrumentName = samplerInstrumentSelect.value;
             settingsUpdate.samplerInstrument = instrumentName;
 
-            if (instrumentName && typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
+            if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
                 AudioBridge.send('setSamplerInstrument', {
                     trackIndex: this.trackSettingsTrackIndex,
                     instrumentName: instrumentName
+                });
+            }
+        }
+
+        // If drum_kit, ensure JUCE has the track wired as a drum kit
+        if (trackMode === 'drum_kit') {
+            if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
+                AudioBridge.send('setDrumKitTrack', {
+                    trackIndex: this.trackSettingsTrackIndex
                 });
             }
         }

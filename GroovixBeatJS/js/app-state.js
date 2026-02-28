@@ -130,6 +130,15 @@ const AppState = {
     // Mixer state per track
     mixerState: [],
 
+    // Master mixer state (single shared bus before AudioOutput)
+    masterMixerState: {
+        mute: false,
+        pan: 0,      // -1 (left) to 1 (right), 0 = center
+        volume: 0.8, // 0 to 1
+        levelL: 0,   // Left level meter (0-1)
+        levelR: 0    // Right level meter (0-1)
+    },
+
     // Track MIDI settings per track
     trackSettings: [],
 
@@ -200,13 +209,39 @@ const AppState = {
         return this.mixerState[trackIndex];
     },
 
+    // Per-track drum kit sample mappings: drumKitMappings[trackIndex][noteNumber] = { filePath, fileName }
+    drumKitMappings: [],
+
+    // Get (or init) the full drum kit mapping for a track
+    getDrumKitMapping: function(trackIndex) {
+        if (!this.drumKitMappings[trackIndex]) {
+            this.drumKitMappings[trackIndex] = {};
+        }
+        return this.drumKitMappings[trackIndex];
+    },
+
+    // Store a single note assignment
+    setDrumKitSample: function(trackIndex, noteNumber, filePath, fileName) {
+        if (!this.drumKitMappings[trackIndex]) {
+            this.drumKitMappings[trackIndex] = {};
+        }
+        this.drumKitMappings[trackIndex][noteNumber] = { filePath, fileName };
+    },
+
+    // Remove a single note assignment
+    clearDrumKitSample: function(trackIndex, noteNumber) {
+        if (this.drumKitMappings[trackIndex]) {
+            delete this.drumKitMappings[trackIndex][noteNumber];
+        }
+    },
+
     // Initialize track settings for a track
     initTrackSettings: function(trackIndex) {
         if (!this.trackSettings[trackIndex]) {
             this.trackSettings[trackIndex] = {
                 midiChannel: trackIndex % 16,  // 0-15, default to track index mod 16
                 midiProgram: 0,                // 0-127, General MIDI program number
-                trackType: 'melody',           // 'melody', 'sample', or 'sampled_instrument'
+                trackType: 'melody',           // 'melody', 'sample', 'sampled_instrument', or 'drum_kit'
                 isPercussion: false,           // Independent percussion flag (drum names + MIDI ch 10)
                 playbackMode: 'loop',          // 'oneshot' or 'loop' (for all track types)
                 instrument: null,              // { pluginId, nodeId, name, state }
@@ -705,6 +740,20 @@ const AppState = {
             ? InstrumentSelector.trackInstruments
             : {};
 
+        // Serialize drum kit mappings (strip non-serializable properties)
+        const drumKitMappings = {};
+        for (let t = 0; t < this.numTracks; t++) {
+            const mapping = this.drumKitMappings[t];
+            if (mapping && Object.keys(mapping).length > 0) {
+                drumKitMappings[t] = {};
+                for (const [note, info] of Object.entries(mapping)) {
+                    if (info && info.filePath) {
+                        drumKitMappings[t][note] = { filePath: info.filePath, fileName: info.fileName || '' };
+                    }
+                }
+            }
+        }
+
         return JSON.stringify({
             version: 8,  // Version 8: track-level type/instrument/FX (rolled back from per-clip)
             tempo: this.tempo,
@@ -720,6 +769,7 @@ const AppState = {
             trackScales: trackScales,
             clipSamples: clipSamples,
             trackInstruments: trackInstruments,
+            drumKitMappings: drumKitMappings,
             graphState: graphState
         });
     },
@@ -978,6 +1028,39 @@ const AppState = {
                             trackIndex: t,
                             instrumentName: ts.samplerInstrument
                         });
+                    }
+                }
+            }
+
+            // Restore drum kit mappings
+            this.drumKitMappings = [];
+            if (data.drumKitMappings) {
+                for (const [trackIndexStr, mapping] of Object.entries(data.drumKitMappings)) {
+                    const t = parseInt(trackIndexStr);
+                    this.drumKitMappings[t] = {};
+                    for (const [noteStr, info] of Object.entries(mapping)) {
+                        if (info && info.filePath) {
+                            this.drumKitMappings[t][noteStr] = info;
+                        }
+                    }
+                }
+                // Re-send all drum kit samples to JUCE
+                if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
+                    for (let t = 0; t < this.numTracks; t++) {
+                        const ts = this.getTrackSettings(t);
+                        if (ts.trackType === 'drum_kit') {
+                            AudioBridge.send('setDrumKitTrack', { trackIndex: t });
+                            const mapping = this.drumKitMappings[t] || {};
+                            for (const [noteStr, info] of Object.entries(mapping)) {
+                                if (info && info.filePath) {
+                                    AudioBridge.send('setDrumKitSample', {
+                                        trackIndex: t,
+                                        noteNumber: parseInt(noteStr),
+                                        filePath: info.filePath
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }

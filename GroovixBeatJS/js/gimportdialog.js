@@ -191,7 +191,8 @@ async function CloseImport(isok)
         //val=ABCRemoveCommentLines(val);
         //console.log("ABCRemoveCommentLines:",val);
         let parsedNotesTracks=abcparser.ParseABCNotationUsingABCJS(val);
-        //console.log("ParseABCNotationUsingABCJS",parsedNotesTracks);
+        console.log("ParseABCNotationUsingABCJS:",parsedNotesTracks);
+        if (( parsedNotesTracks ?? []).length==0) {alert("Notes not found. Format Error.");return;}
 
         
         if ($("#ImportMergeTracks").val()=="1")
@@ -205,8 +206,9 @@ async function CloseImport(isok)
               }
             }
             notes.sort((a, b) => { return a.seq - b.seq; });
-            parsedNotesTracks[0].notes=notes;
             console.log("************ Combined ",notes);
+            parsedNotesTracks[0].notes=notes;
+            
 
             await LoadParsedTrackNotesToGrid([parsedNotesTracks[0]],ClearNotesBeforeImport)
         }
@@ -635,6 +637,7 @@ function OnChangeImportType()
   $("#GNotesWizard").hide();
   $("#ChordMelodyWizard").hide();
   $("#MidiImportWizard").hide();
+  $("#GNotesWizardHelp").hide();
 
   switch(val)
   {
@@ -644,6 +647,7 @@ function OnChangeImportType()
     case "GNotes": $("#GNotesWizard").show();break;
     case "ChordMelody": $("#ChordMelodyWizard").show();break;
     case "Midi": $("#MidiImportWizard").show();break;
+    case "GNotesHelp": $("#GNotesWizardHelp").show();break;
 
   }
 

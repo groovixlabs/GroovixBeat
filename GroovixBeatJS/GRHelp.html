@@ -1,0 +1,188 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grid Raga GRNotes Help</title>
+    <link rel="stylesheet" href="css/index.css">
+    <style>
+        pre
+        {
+            font-size:12px;
+            color: #d5a865;
+            padding: 0px;
+        }
+    </style>
+</head>
+<body>
+<div>
+<pre >
+    For quick Data entry and quick repeats with recursion we have a simpler notation called GNotes.
+    
+    GNote Notation was created to quickly import Notes into the Piano roll without placing notes 
+    manually using mouse etc.
+    
+    GNotes consist of lines of text You can have a Note Line and a Chord Line
+    
+    The Lines start with Three characters , First is the Type (Notes/Chords) , Octave (1-5) , NoteDuration
+    
+    Example:  
+    #54 C 3(C)       D#     EbA CD  2(CD DE)  
+    &54 Cmaj  Cmin   2(Cmin Cmin) 2(Cmin Dmin) 2(Fmaj7 Fmaj7)  
+              
+    # Indicates that the Line Represents a Note Line 
+    & Indicates Chords.   
+    5 Indicates the Octave
+    4 Indicates the Duration
+    
+    
+    ######################################################
+    # Notes
+    
+    You can use standard Note notation in upper case character for root note.  
+    Example : C D E F G H  
+    
+    Sharp uses  Note followed by the lowercase # character.  
+    Example : C# D#  
+    
+    Flat uses  Note followed by the lowercase b character.  
+    Example : Db Eb  
+    
+    If you would like to specify the octave you can specify it as a number at the end  
+    Example : C6 Db4 F#3
+    
+
+    ######################################################
+    # Controling the  Note Length
+    
+    Normally the notes will play for the default note length   
+    Ex:  
+    #54 C  
+    
+    Will Play C Note for 4 Slots.
+    
+    If you want to Extend ( double ) the notelength you can use *2 .  
+    The note extends by the number of times you specify .
+    
+    #54 C*2  
+    Will Play the C Note for 8 slots
+    
+    #54 C*3  
+    Will Play the C Note for 12 slots
+    
+    #54 C*4 D*3 E*2 F
+    Will Play the C Note for 16 slots followed by D for 12 slots and E for 8 and F for 4 slots.
+    
+    You can shorten (Halve) the note length using the / character.
+    
+    #54 C/2 D2/2 E F#/4
+    Will Play the C Note for 2 slots followed by D2(D In Octave 2) for 2 slots and E for 4 and F# for 1 slots.
+    
+    
+    Similarly if you want to add Slots instead of multiplying the defualt note length.
+    you can use + and -
+    
+    #54 C+1 D-1
+    So C will play for 4+1=>5 slots and D for 4-1=>3 Slots.
+    
+    
+    
+    ########################################################################
+    # REST Notes
+    
+    Rest notes are indicated by Z and follow the same time notation with * / + - .
+    
+    #54 C/2 Z*2 D2/2 E F#/4
+
+    
+
+    ########################################################################
+    # Playing multiple notes at the same time - Grouping.
+    
+    To play multiple notes you should bunch the notes together without any spaces.
+    #54 CEG CEG
+    Will Play the CEG together for 4 slots , 2 times.
+    
+    You can also control the leghth of the notes with . and ,  for individual notes.  
+    #54 C*2E/2G/2 C*2E*3G C*2E#/2Fb*2
+    
+
+
+    ########################################################################
+    # Repeating notes.
+    
+    #54 C C C C 
+    You can repeat notes by specifying it multiple times or use the repeat notation N()
+    where N is the number of times to repeat the contents in the paranthesis ().
+    
+    #54 4(C)
+    #54 2(C, D, CEG) D
+    
+    You can also recurse the repeat pattern which is very powerfull. This can be used to repeat phrases.
+    
+    #54 2(C, D, 3(CEG) ) D
+    #54 2(C, D, 3(C E G) ) D
+    
+    ########################################################################
+    # Chords
+    
+    Chords are also use similar structure 
+    
+    &58 C D*2 E G
+    
+    When nothing is specified its assumed to be a major chord.
+    
+    Here are the specifiers for other chords.
+    
+
+    - sus2  Suspended 2 
+    - sus4  Suspended 4
+    - maj7  Major 7
+    - min7  Minor 7
+    - dim7  Diminished 7
+    - m7b5  Half-diminished
+    - maj9  Major 9
+    - min9  Minor 9
+    
+    - maj   Major
+    - min   Minor
+    - dim   Diminished
+    - aug   Augmented
+    
+    - 11    Dominant 11
+    - 13    Dominant 13
+    
+    - 7     Dominant 7    
+    - 9     Dominant 9
+    
+    &58 Cmaj   Cmin   2(Cmin Cmin) 2(Cmin Dmin) 2(Fmaj7 Fmaj7)
+    
+    &58 Cmaj Cmin
+    
+    &58 Cmaj*2   Cmin R  2(Cmin Cmin) 2(Cmin Dmin) 2(Fmaj7 Fmaj7)
+    
+    Aliases for minor
+    Cm, Cm7, Cm9, C-, C-7, Cmin, Cmin7
+
+
+    At minimum, keep:
+
+    maj, min, dim, aug, sus2, sus4
+
+    7, 9, 11, 13
+
+    maj7, min7, maj9, min9, dim7, m7b5
+
+    
+    
+    chordToMidi(4, "C7b9") → includes 70 (Bb) + 73 (Db)
+    chordToMidi(4, "C7#9") → includes 75 (D#)
+    chordToMidi(4, "C7#11") → includes 78 (F#)
+    chordToMidi(4, "Cm(maj7)") → includes 71 (B natural) instead of 70
+
+</pre>
+
+</div>
+</body>
+</html>

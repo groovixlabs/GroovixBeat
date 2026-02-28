@@ -15,6 +15,59 @@ constructor(brand)
 
   }
 
+foldIntoRange(midi, lo, hi) {
+  while (midi < lo) midi += 12;
+  while (midi > hi) midi -= 12;
+  return midi;
+}
+
+normalizeChordType(ntypeRaw) {
+  if (!ntypeRaw) return "maj";
+
+  let t = ntypeRaw.trim();
+
+  // Common symbols / variants
+  t = t.replace(/Δ/gi, "maj");
+  t = t.replace(/[–−]/g, "-"); // handle weird minus chars
+
+  // Aliases: Cm, C-, etc.
+  // Convert leading "m" (but not "maj") to "min"
+  if (t === "m") return "min";
+  if (t.startsWith("m") && !t.startsWith("maj")) t = "min" + t.slice(1);
+
+  // Convert leading "-" to "min" (C-7, C-9, etc.)
+  if (t.startsWith("-")) t = "min" + t.slice(1);
+
+  // Some people write "minor7", "minor9" etc.
+  t = t.replace(/^minor/i, "min");
+  t = t.replace(/^major/i, "maj");
+
+  // You already use "dim", "aug", "sus2", "sus4", etc.
+  return t.toLowerCase();
+}
+
+splitChordAndBass(chordStr) {
+  // Handle null/undefined/non-string inputs safely
+  if (chordStr == null) {
+    return { main: "", bass: null };
+  }
+
+  const s = String(chordStr).trim();
+  if (!s.length) {
+    return { main: "", bass: null };
+  }
+
+  const slash = s.indexOf("/");
+  if (slash === -1) {
+    return { main: s, bass: null };
+  }
+
+  return {
+    main: s.slice(0, slash),
+    bass: s.slice(slash + 1) || null
+  };
+}
+
 chords = {
     C: {
         major: [60, 64, 67],
@@ -387,301 +440,439 @@ Diminished 7	Bdim7 (B-D-F-Ab)	Bdim7/D (D-F-Ab-B)	Bdim7/F (F-Ab-B-D)
     "9": [0, 4, 7, 10, 14]   // Dominant 9
 };
 
- chordToMidi(octave = 4,mainChord) {
 
-    // Parse inversion (if present)
-    //let [mainChord, bassNote] = chord.split("/");
-    // Extract root and chord type
-    /*
-    const match = mainChord.match(/^([A-Ga-g#b]+)(.*)$/);
-    if (!match) {console.log("No Match:",mainChord);return [ "","", [] ];}
+voiceChordPianoFriendly(rootMidi, midiNotes, opts = {}) {
+  const {
+    leftRange  = [36, 55],   // C2..G3 (left hand)
+    rightRange = [60, 84],   // C4..C6 (right hand)
+    preferRootInBass = true,
+    spreadMin = 7,           // minimum gap between LH and RH lowest note
+    maxNotes = 5,            // keep it playable
+    dropFifthIfCrowded = true
+  } = opts;
 
-    const root = match[1].replace('♯', '#').replace('♭', 'b');
-    const mtype = match[2] ?? "";  // We send this back for length adjustment to let the tokenizer figure out the timing.
-    */
+  if (!Array.isArray(midiNotes) || midiNotes.length === 0) return [];
 
-    mainChord=mainChord.replace('♯', '#').replace('♭', 'b');
-    let root="";
-    let i=0;
-    if ((i < mainChord.length) && (((mainChord[i]>='A')&&(mainChord[i]<='G')) || (mainChord[i]=='Z') ))
-    {
-      root+=mainChord[i];i++;
+  // Work with pitch classes (intervals from root) to identify chord tones
+  const rootPC = (rootMidi % 12 + 12) % 12;
+  const pcs = [...new Set(midiNotes.map(n => (n % 12 + 12) % 12))];
+
+  const has = (interval) => pcs.includes((rootPC + interval) % 12);
+
+  // Identify functional tones by interval
+  const pcRoot = (rootPC + 0)  % 12;
+  const pc3    = has(3) ? (rootPC + 3) % 12 : (has(4) ? (rootPC + 4) % 12 : null);
+  const pc5    = has(7) ? (rootPC + 7) % 12 : (has(6) ? (rootPC + 6) % 12 : (has(8) ? (rootPC + 8) % 12 : null));
+  const pc7    = has(10) ? (rootPC + 10) % 12 : (has(11) ? (rootPC + 11) % 12 : null);
+  const pc9    = has(14) ? (rootPC + 2) % 12 : null;
+  const pc11   = has(17) ? (rootPC + 5) % 12 : null;
+  const pc13   = has(21) ? (rootPC + 9) % 12 : null;
+
+  // Build a target “piano-friendly” tone priority:
+  // LH: root (or 3rd if rootless), maybe 7th
+  // RH: 3rd, 7th, then color tones (9/11/13), then 5th if room
+  const leftTargets = [];
+  const rightTargets = [];
+
+  if (preferRootInBass) leftTargets.push(pcRoot);
+  else if (pc3 != null) leftTargets.push(pc3);
+  else leftTargets.push(pcRoot);
+
+  // Put 7th in left occasionally for richer harmony (helps dominant & maj7/min7)
+  if (pc7 != null) leftTargets.push(pc7);
+
+  if (pc3 != null) rightTargets.push(pc3);
+  if (pc7 != null) rightTargets.push(pc7);
+
+  // Color tones (if present)
+  if (pc9 != null)  rightTargets.push(pc9);
+  if (pc11 != null) rightTargets.push(pc11);
+  if (pc13 != null) rightTargets.push(pc13);
+
+  // Fifth is optional; often dropped in dense chords
+  if (pc5 != null) rightTargets.push(pc5);
+
+  // Remove duplicates while preserving order
+  const uniq = (arr) => {
+    const s = new Set();
+    return arr.filter(x => (x != null) && (s.has(x) ? false : (s.add(x), true)));
+  };
+
+  const LHpcs = uniq(leftTargets);
+  let RHpcs   = uniq(rightTargets);
+
+  // If crowded and allowed, drop the 5th from RH
+  if (dropFifthIfCrowded && RHpcs.length > 3 && pc5 != null) {
+    RHpcs = RHpcs.filter(pc => pc !== pc5);
+  }
+
+  // Map pitch classes to actual midi in ranges
+  const makeNotesInRange = (pcList, lo, hi) => {
+    const notes = [];
+    for (const pc of pcList) {
+      // Start near the middle of the range, then fold
+      const mid = Math.round((lo + hi) / 2);
+      let n = mid - ((mid - pc) % 12);
+      n = this.foldIntoRange(n, lo, hi);
+      // Ensure exact pitch class
+      while ((n % 12 + 12) % 12 !== pc) n += 12;
+      n = this.foldIntoRange(n, lo, hi);
+      notes.push(n);
     }
-    if ((i < mainChord.length) && ((mainChord[i]=='#')||(mainChord[i]=='b')))
-    {
-      root+=mainChord[i];i++;
+    return notes.sort((a,b)=>a-b);
+  };
+
+  let LH = makeNotesInRange(LHpcs, leftRange[0], leftRange[1]);
+  let RH = makeNotesInRange(RHpcs, rightRange[0], rightRange[1]);
+
+  // Ensure RH isn't too close to LH (avoid mud / hand collision)
+  if (LH.length && RH.length) {
+    const lhTop = Math.max(...LH);
+    while (RH.length && RH[0] - lhTop < spreadMin) {
+      RH = RH.map(n => n + 12).filter(n => n <= rightRange[1]);
+      if (!RH.length) break;
     }
-    if ((i < mainChord.length) && ((mainChord[i]>='0')&&(mainChord[i]<='9')))
-    {
-      octave=parseInt(mainChord[i]);i++;
-    }
-    let remaining=mainChord.substring(i)
-    console.log(i,mainChord,"remaining:",remaining);
-    let ntypeA=remaining.split(/[*+\-/]/) ;
-    let ntype="",fact=0;
-    let oper='';
-    if (ntypeA[0].length==0) ntype='maj';else ntype=ntypeA[0];
-    if (ntypeA.length==2) 
-    {
-      let ol=i+ntypeA[0].length;
-      oper=mainChord.substring(ol,ol+1);
-      fact=parseInt(ntypeA[1]);
-    }
-    //console.log(mainChord,"root:"+root,"o:"+octave,"typ:",ntypeA,"ntype",ntype,"oper",oper,"fact",fact);
+  }
 
-    if (root=='Z') return [ true,root,octave,ntype,oper,fact, [] ];
+  // Limit total notes to maxNotes (prefer keeping 3rd+7th+root)
+  let combined = [...LH, ...RH].sort((a,b)=>a-b);
+  if (combined.length > maxNotes) {
+    // priority keep: root, 3rd, 7th, 9/13, then others
+    const priorityPCs = uniq([pcRoot, pc3, pc7, pc9, pc13, pc11, pc5]);
+    const scored = combined.map(n => {
+      const pc = (n % 12 + 12) % 12;
+      const idx = priorityPCs.indexOf(pc);
+      return { n, score: (idx === -1 ? 999 : idx) };
+    }).sort((a,b)=>a.score-b.score || a.n-b.n);
 
-    if (this.noteToMidi[root]==undefined) {console.log("root not found:",root,this.noteToMidi[root]);return [ false,root,octave,ntype,oper,fact, [] ];} // Invalid chord
-    //let rootMidi = noteTo Midi[root] + (12 * (octave + 2));
-    let rootMidi =this.GetMidiForName(octave,root);
+    combined = scored.slice(0, maxNotes).map(x => x.n).sort((a,b)=>a-b);
+  }
 
-
-    let chordFormula = Object.keys(this.chordFormulas).find(key => ntype.startsWith(key));
-    if (chordFormula==undefined) 
-      {
-        console.log("chord Formulas not found:",ntype);
-        return [ false,root,octave,ntype,oper,fact, [] ];
-      } // Invalid chord
-
-    let midiNotes = this.chordFormulas[chordFormula].map(interval => rootMidi + interval);
-    //console.log("chordFormula:",chordFormula,"midiNotes:",midiNotes);
-
-    return [true, root,octave,ntype,oper,fact, midiNotes ];
-
-
-/*    //if (ntype.length==0) ntype="maj";// Default to major if no suffix
-    //console.log("match:",match,type);
-
-    // Get MIDI number of root
-    if (noteToMidi[root]==undefined) {console.log("root not found:",root,noteToMidi[root]);return [ root,mtype, [] ];}
-    let rootMidi = noteToMidi[root] + (12 * (octave + 1));
-    console.log("rootMidi:",rootMidi);
-
-    // Find the chord formula
-
-    let chordFormula = Object.keys(chordFormulas).find(key => ntype.startsWith(key));
-    if (chordFormula==undefined) {console.log("chordFormulas not found:",mtype,ntype);return [ root,mtype, [] ];} // Invalid chord
-
-    return;
-
-    // Generate MIDI notes
-    let midiNotes = chordFormulas[chordFormula].map(interval => rootMidi + interval);
-    //console.log("chordFormula:",chordFormula,"midiNotes:",midiNotes);
-
-    // Handle inversion (if present)
-    if (bassNote) {
-        bassNote = bassNote.replace('♯', '#').replace('♭', 'b');
-        if (!noteToMidi[bassNote]) return [];
-
-        let bassMidi = noteToMidi[bassNote] + (12 * (octave + 1));
-        
-        // Ensure the bass note is the lowest note
-        midiNotes = midiNotes.filter(note => note !== bassMidi);
-        midiNotes.unshift(bassMidi);
-    }
-
-    return [ root,mtype,midiNotes];
-*/    
+  return combined;
 }
 
-/*
-console.log(chordToMidi("C"));        // C Major: [60, 64, 67]
-console.log(chordToMidi("Am"));       // A Minor: [57, 60, 64]
-console.log(chordToMidi("Csus2"));    // C Suspended 2: [60, 62, 67]
-console.log(chordToMidi("Cmaj9"));    // C Major 9: [60, 64, 67, 71, 74]
-console.log(chordToMidi("G7"));       // G Dominant 7: [55, 59, 62, 65]
-console.log(chordToMidi("Ddim7"));    // D Diminished 7: [62, 65, 68, 71]
-console.log(chordToMidi("C/E"));      // C Major 1st inversion: [64, 67, 72, 60]
-console.log(chordToMidi("G/B"));      // G Major 1st inversion: [59, 62, 67, 71]
-console.log(chordToMidi("D/F#"));     // D Major 1st inversion: [54, 57, 62, 66]
-*/
+parseQualityAndMods(ntypeRaw) {
+  // returns { baseKey, mods, rawNorm }
+  // baseKey must exist in chordFormulas (maj, min, dim, aug, sus2, sus4, 7, maj7, min7, dim7, m7b5, 9, 11, 13, maj9, min9)
+  let t = this.normalizeChordType(ntypeRaw); // from the earlier upgrade
 
+  // Handle minor-major 7 styles: min(maj7), m(maj7)
+  // We treat this as a "min" base plus an added major 7 (11 semitones) instead of minor7's 10.
+  let minorMajor7 = false;
+  if (/\(maj7\)/i.test(t) || /\(M7\)/.test(t)) {
+    minorMajor7 = true;
+    t = t.replace(/\(maj7\)/ig, "").replace(/\(M7\)/g, "");
+  }
 
-//************************************************************************************** */
+  // Extract modifiers like b9, #9, b5, #5, #11, b13, add9 etc.
+  // We'll collect tokens in order.
+  const mods = [];
 
-/*
-function stringToMidi(input, octave = 4) {
+  // normalize unicode accidentals if any
+  t = t.replace(/♭/g, "b").replace(/♯/g, "#");
 
-    const extractChord = (chord) => {
-        let match = chord.match(/^([A-Ga-g#b]+)(.*)$/);
-        if (!match) return [];
+  // capture tokens like: b9 #9 b5 #5 #11 b13 add9 add11 add13
+  const re = /(add\d+|[#b]\d+)/ig;
+  let m;
+  while ((m = re.exec(t)) !== null) mods.push(m[1].toLowerCase());
 
-        const root = match[1].replace('♯', '#').replace('♭', 'b');
-        const type = match[2] || "maj";
+  // Remove mod tokens from the base string
+  const baseOnly = t.replace(re, "");
 
-        if (!noteToMidi[root]) return [];
-        let rootMidi = noteToMidi[root] + (12 * (octave + 1));
+  // Base selection: try longest-first match in your existing chordFormulas
+  const keys = Object.keys(this.chordFormulas).sort((a,b)=>b.length-a.length);
+  let baseKey = keys.find(k => baseOnly.startsWith(k));
+  if (!baseKey) baseKey = "maj"; // default
 
-        let chordFormula = Object.keys(chordFormulas).find(key => type.startsWith(key));
-        if (!chordFormula) return []; 
-
-        return chordFormulas[chordFormula].map(interval => rootMidi + interval);
-    };
-
-    const extractNote = (note) => {
-        note = note.replace('♯', '#').replace('♭', 'b');
-        return noteToMidi[note] !== undefined ? noteToMidi[note] + (12 * (octave + 1)) : null;
-    };
-
-    let midiOutput = [];
-    let isChord = false;
-    let chordBuffer = "";
-
-    for (let i = 0; i < input.length; i++) {
-        let char = input[i];
-
-        if (char === '"') {
-            if (isChord) {
-                midiOutput.push(extractChord(chordBuffer.trim()));
-                chordBuffer = "";
-            }
-            isChord = !isChord;
-        } else if (isChord) {
-            chordBuffer += char;
-        } else if (char === " ") {
-            continue; // Ignore spaces
-        } else {
-            let note = char.toUpperCase(); // Handle single-character notes like A, B, C...
-            if (i + 1 < input.length && (input[i + 1] === "#" || input[i + 1] === "b")) {
-                note += input[i + 1]; // Capture sharps/flats
-                i++;
-            }
-            let midiNote = extractNote(note);
-            if (midiNote !== null) {
-                midiOutput.push(midiNote);
-            }
-        }
-    }
-
-    return midiOutput;
+  // If it’s minor-major7, we’ll apply a special “replace 7th” later.
+  return { baseKey, mods, rawNorm: t, minorMajor7 };
 }
 
+applyModsToIntervals(baseKey, baseIntervals, mods, minorMajor7=false) {
+  // baseIntervals are semitone offsets from root, e.g. [0,4,7,10]
+  const set = new Set(baseIntervals);
 
-// 🎹 Test Cases:
-console.log(stringToMidi('A "CMaj" C D')); // [69, [60, 64, 67], 60, 62]
-console.log(stringToMidi('"Amaj" CMaj D "Cmin"')); // [[57, 61, 64], [60, 64, 67], 62, [60, 63, 67]]
-console.log(stringToMidi('"Amaj" D E F G "Cmin"')); // [[57, 61, 64], 62, 64, 65, 67, [60, 63, 67]]
-console.log(stringToMidi('"G7" B "Fmaj7" A')); // [[55, 59, 62, 65], 59, [53, 57, 60, 64], 69]
-*/
+  // Helper: replace an interval if present
+  const replace = (from, to) => {
+    if (set.has(from)) { set.delete(from); set.add(to); }
+    else { set.add(to); } // if not present, just add
+  };
 
-
-
-// We'll modify the tokenizeString function to preserve the double quotes in the token.
-// Then in parseToken, if a token is wrapped in quotes, we'll treat it as a literal.
-// This allows us to distinguish quoted tokens from regular tokens.
-/*
-function tokenizeString(input) {
-    const tokens = [];
-    let i = 0;
-  
-    function skipWhitespace() {
-      while (i < input.length && /\s/.test(input[i])) {
-        i++;
-      }
-    }
-  
-    while (i < input.length) {
-      skipWhitespace();
-      if (i >= input.length) break;
-  
-      // If we start with a double quote, record the entire quoted string, including quotes.
-      if (input[i] === '"') {
-        // Mark the start
-        const start = i;
-        i++; // skip the opening quote
-        // Move until we find the closing quote (simplified, ignoring escape sequences)
-        while (i < input.length && input[i] !== '"') {
-          i++;
-        }
-        // If we found a closing quote, move one more char to include it.
-        if (i < input.length && input[i] === '"') {
-          i++;
-        }
-        const end = i;
-        tokens.push(input.substring(start, end));
-      } else {
-        // Otherwise, read a token that might contain nested parentheses.
-        let tokenContent = '';
-        let parenDepth = 0;
-  
-        while (
-          i < input.length && (
-            !/\s/.test(input[i]) || parenDepth > 0
-          )
-        ) {
-          const c = input[i];
-          if (c === '(') {
-            parenDepth++;
-          } else if (c === ')') {
-            if (parenDepth > 0) {
-              parenDepth--;
-            }
-          }
-          tokenContent += c;
-          i++;
-        }
-  
-        tokens.push(tokenContent);
-      }
-    }
-  
-    return tokens;
+  // Minor-major7: ensure 11 (maj7) instead of 10 (min7)
+  if (minorMajor7) {
+    // If base is min7/min9 etc, it likely has 10; force 11.
+    replace(10, 11);
   }
-  
-  // Helper to deeply clone arrays (just for demonstration)
-  function deepClone(obj) {
-    return JSON.parse(JSON.stringify(obj));
-  }
-  
-  function parseRecursively(str) {
-    const tokens = tokenizeString(str);
-    const result = [];
-  
-    for (const t of tokens) {
-      result.push(...parseToken(t));
-    }
-  
-    return result;
-  }
-  
-  function parseToken(token) {
-    // If token starts with a double quote and ends with a double quote,
-    // treat as a literal (i.e., do not interpret as N(...)).
-    if (token.length >= 2 && token[0] === '"' && token[token.length - 1] === '"') {
-      return [token];
-    }
-  
-    // Otherwise, check if it matches the pattern N(...)
-    const match = token.match(/^([0-9]+)\((.*)\)$/);
-    if (match) {
-      const n = parseInt(match[1], 10);
-      const inside = match[2].trim();
-      const insideParsed = parseRecursively(inside);
-  
-      const repeated = [];
-      for (let i = 0; i < n; i++) {
-        repeated.push(deepClone(insideParsed));
-      }
-      return repeated;
-    } else {
-      // literal token
-      return [token];
+
+  for (const token of mods) {
+    switch (token) {
+      // Fifth alterations
+      case "b5": replace(7, 6); break;
+      case "#5": replace(7, 8); break;
+
+      // 9 alterations (dominant/jazz)
+      case "b9": replace(14, 13); break;
+      case "#9": replace(14, 15); break;
+
+      // 11 alterations
+      case "b11": replace(17, 16); break;
+      case "#11": replace(17, 18); break;
+
+      // 13 alterations
+      case "b13": replace(21, 20); break;
+      case "#13": replace(21, 22); break;
+
+      // Add tones (do not replace; just add)
+      case "add9": set.add(14); break;
+      case "add11": set.add(17); break;
+      case "add13": set.add(21); break;
+
+      default:
+        // ignore unknown modifiers safely
+        break;
     }
   }
 
-  // Flatten function to take an arbitrarily nested array and return a single-level array
-function flattenArray(arr) {
-    const flattened = [];
-    for (const item of arr) {
-      if (Array.isArray(item)) {
-        flattened.push(...flattenArray(item));
-      } else {
-        flattened.push(item);
-      }
-    }
-    return flattened;
+  // Return sorted intervals (nice + stable)
+  return Array.from(set).sort((a,b)=>a-b);
+}
+
+voiceChordPopTriad(rootMidi, midiNotes, opts = {}) {
+  // Self-contained, "thick" pop triad voicing:
+  // LH: root + (optional) root octave + (optional) fifth
+  // RH: triad in a comfortable range + (optional) root octave
+
+  const {
+    leftRange  = [36, 52],   // C2..E3 (keeps bass clean)
+    rightRange = [60, 84],   // C4..C6
+    addLeftOctave = true,    // adds root+12 in LH (fat)
+    addLeftFifth  = true,    // adds fifth in LH (power)
+    addRightOctave = true,   // adds root+12 in RH (shine)
+    maxNotes = 6,            // safety cap
+  } = opts;
+
+  if (!Array.isArray(midiNotes) || midiNotes.length === 0 || typeof rootMidi !== "number") return [];
+
+  const foldIntoRange = (m, lo, hi) => {
+    while (m < lo) m += 12;
+    while (m > hi) m -= 12;
+    return m;
+  };
+
+  const pc = (n) => ((n % 12) + 12) % 12;
+
+  // Unique pitch classes from the chord
+  const pcs = [...new Set(midiNotes.map(pc))];
+  const rootPC = pc(rootMidi);
+
+  const hasPC = (p) => pcs.includes(p);
+
+  // Determine chord tones: 3rd (minor/major) and 5th (perf/dim/aug)
+  const pcMin3 = (rootPC + 3) % 12;
+  const pcMaj3 = (rootPC + 4) % 12;
+  const pcP5   = (rootPC + 7) % 12;
+  const pcDim5 = (rootPC + 6) % 12;
+  const pcAug5 = (rootPC + 8) % 12;
+
+  const thirdPC =
+    hasPC(pcMin3) ? pcMin3 :
+    hasPC(pcMaj3) ? pcMaj3 : null;
+
+  const fifthPC =
+    hasPC(pcP5) ? pcP5 :
+    hasPC(pcDim5) ? pcDim5 :
+    hasPC(pcAug5) ? pcAug5 : null;
+
+  // Helper: pick a MIDI note of a pitch-class near a target, then fold into range
+  const pcToMidiNear = (pitchClass, targetMidi, lo, hi) => {
+    let n = targetMidi - ((targetMidi - pitchClass) % 12);
+    while (pc(n) !== pitchClass) n += 12;
+    return foldIntoRange(n, lo, hi);
+  };
+
+  // --- Left hand: root anchor (thick) ---
+  const out = [];
+
+  let lhRoot = foldIntoRange(rootMidi, leftRange[0], leftRange[1]);
+  out.push(lhRoot);
+
+  if (addLeftOctave) {
+    let lhOct = lhRoot + 12;
+    if (lhOct <= leftRange[1] + 7) out.push(lhOct); // allow a little spillover
+  }
+
+  if (addLeftFifth && fifthPC != null) {
+    // Put 5th above the LH root if possible, else below
+    let lh5 = pcToMidiNear(fifthPC, lhRoot + 7, leftRange[0], leftRange[1] + 12);
+    // Avoid duplicating exact notes
+    if (!out.includes(lh5)) out.push(lh5);
+  }
+
+  // --- Right hand: triad cluster (thick but not muddy) ---
+  const rhMid = Math.round((rightRange[0] + rightRange[1]) / 2);
+
+  // Build RH triad: root, 3rd, 5th (as available)
+  const rh = [];
+
+  const rhRoot = pcToMidiNear(rootPC, rhMid, rightRange[0], rightRange[1]);
+  rh.push(rhRoot);
+
+  if (thirdPC != null) rh.push(pcToMidiNear(thirdPC, rhRoot + 4, rightRange[0], rightRange[1]));
+  if (fifthPC != null) rh.push(pcToMidiNear(fifthPC, rhRoot + 7, rightRange[0], rightRange[1]));
+
+  // Keep RH ordered and spread a bit
+  rh.sort((a, b) => a - b);
+
+  // Optional RH octave of root for “shine”
+  if (addRightOctave) {
+    const rhOct = rhRoot + 12;
+    if (rhOct <= rightRange[1] && !rh.includes(rhOct)) rh.push(rhOct);
+  }
+
+  // Merge, de-dup exact MIDI notes, sort
+  const merged = [...out, ...rh]
+    .filter((n) => typeof n === "number")
+    .sort((a, b) => a - b)
+    .filter((n, idx, arr) => idx === 0 || n !== arr[idx - 1]);
+
+  // Safety: cap notes (keep lowest + then highest “musical” tones)
+  if (merged.length > maxNotes) {
+    // keep bass root, then keep top notes
+    const bass = merged[0];
+    const top = merged.slice(1).slice(-(maxNotes - 1));
+    return [bass, ...top].sort((a, b) => a - b);
+  }
+
+  return merged;
+}
+
+ chordToMidi(octave = 4, mainChord,voicing='') {
+  // Handle inversion first: "Cmin7/Eb"
+  const { main, bass } = this.splitChordAndBass(mainChord);
+
+  // Normalize accidentals in main chord and bass note
+  let chord = main.replace('♯', '#').replace('♭', 'b');
+  let bassNote = bass ? bass.replace('♯', '#').replace('♭', 'b') : null;
+
+  // Parse root
+  let root = "";
+  let i = 0;
+
+  if ((i < chord.length) && (((chord[i] >= 'A') && (chord[i] <= 'G')) || (chord[i] == 'Z'))) {
+    root += chord[i]; i++;
+  }
+  if ((i < chord.length) && ((chord[i] == '#') || (chord[i] == 'b'))) {
+    root += chord[i]; i++;
+  }
+
+  // Optional octave digit right after root (your existing behavior)
+  /*
+  if ((i < chord.length) && ((chord[i] >= '0') && (chord[i] <= '9'))) {
+    octave = parseInt(chord[i]); i++;
   }
   */
+
+// Optional octave digit ONLY if it looks like an octave spec (e.g., C4maj7)
+// If it's end/operator/slash, it's almost certainly a chord extension (G7, C9, etc.)
+if ((i < chord.length) && (chord[i] >= '0') && (chord[i] <= '9')) {
+  const next = (i + 1 < chord.length) ? chord[i + 1] : '';
+  if (/[A-Za-z(]/.test(next)) {   // only then treat as octave
+    octave = parseInt(chord[i], 10);
+    i++;
+  }
+}
+
+  let remaining = chord.substring(i);
+
+  // Split type vs duration operator (* / + -)
+  let ntypeA = remaining.split(/[*+\-/]/);
+  let ntypeRaw = (ntypeA[0].length === 0) ? "maj" : ntypeA[0];
+
+  let oper = '';
+  let fact = 0;
+  if (ntypeA.length === 2) {
+    let ol = i + ntypeA[0].length;
+    oper = chord.substring(ol, ol + 1);
+    fact = parseInt(ntypeA[1]);
+  }
+
+  // Rest chord
+  if (root === 'Z') return [ true, root, octave, ntypeRaw, oper, fact, [] ];
+
+  // Validate root
+  if (this.noteToMidi[root] === undefined) {
+    console.log("root not found:", root, this.noteToMidi[root]);
+    return [ false, root, octave, ntypeRaw, oper, fact, [] ];
+  }
+
+  // Normalize chord type aliases
+  let ntype = this.normalizeChordType(ntypeRaw);
+
+  // Root MIDI
+  let rootMidi = this.GetMidiForName(octave, root);
+  
+
+// Normalize chord type aliases + parse modifiers
+const { baseKey, mods, minorMajor7 } = this.parseQualityAndMods(ntypeRaw);
+
+let baseIntervals = this.chordFormulas[baseKey];
+if (!baseIntervals) {
+  console.log("base chord not found:", baseKey, "from:", ntypeRaw);
+  return [ false, root, octave, ntypeRaw, oper, fact, [] ];
+}
+
+// Apply alterations/extensions
+const finalIntervals = this.applyModsToIntervals(baseKey, baseIntervals, mods, minorMajor7);
+
+// Build MIDI notes
+let midiNotes = finalIntervals.map(interval => rootMidi + interval);
+
+if (voicing=='piano')
+{
+    midiNotes = this.voiceChordPianoFriendly(rootMidi, midiNotes, {
+    leftRange: [36, 55],
+    rightRange: [60, 84],
+    maxNotes: 5
+    });
+} else if (voicing=='pop')
+{
+    midiNotes = this.voiceChordPopTriad(rootMidi, midiNotes, {
+    addLeftOctave: true,
+    addLeftFifth: true,
+    addRightOctave: true,
+    maxNotes: 6
+    });
+}
+
+  // Apply slash bass, if present
+  if (bassNote) {
+    // Allow bass note to include octave digit like "E3"
+    let bn = bassNote;
+    let bOct = octave;
+    const m = bn.match(/^([A-Ga-g])([#b]?)(\d+)?$/);
+    if (m) {
+      bn = m[1].toUpperCase() + (m[2] || "");
+      if (m[3] != null) bOct = parseInt(m[3], 10);
+    } else {
+      // If invalid, ignore slash to avoid crashing
+      bn = null;
+    }
+
+    if (bn && this.noteToMidi[bn] !== undefined) {
+      let bassMidi = this.GetMidiForName(bOct, bn);
+
+      // Ensure bass is the lowest note:
+      // If bass is higher than current lowest, drop it by octaves until it sits below.
+      while (bassMidi >= Math.min(...midiNotes)) bassMidi -= 12;
+
+      // Remove duplicates (same pitch class in same octave)
+      midiNotes = midiNotes.filter(n => n !== bassMidi);
+      midiNotes.unshift(bassMidi);
+    }
+  }
+
+  return [ true, root, octave, ntypeRaw, oper, fact, midiNotes ];
+}
 
 
     GetMidiForName(octave,note)
@@ -690,6 +881,19 @@ function flattenArray(arr) {
       return this.noteToMidi[note] !== undefined ? this.noteToMidi[note] + (12 * (octave + 1)) : null; // We start from -2 octave
   }
   
+  GetNameFromMidi(midi, preferSharps = true) {
+  if (typeof midi !== "number") return null;
+
+  const sharpNames = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const flatNames  = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
+
+  const names = preferSharps ? sharpNames : flatNames;
+
+  const pc = ((midi % 12) + 12) % 12;
+  const octave = Math.floor(midi / 12) - 1;  // MIDI 60 = C4
+
+  return names[pc] + octave;
+}
 
   MidiInstrumentNames = [
   "Acoustic Grand Piano",

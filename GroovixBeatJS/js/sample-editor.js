@@ -1795,74 +1795,60 @@ const SampleEditor = {
 
     // JUCE File Browser state
     juceFileBrowser: {
-        files: [],
         basePath: '',
-        folderTree: {},
+        loadedFolders: {},        // relativePath -> { folders:[{name,relativePath}], files:[...] } cache
         expandedFolders: new Set(),
         currentFolder: '',
-        selectedFile: null
+        selectedFile: null,
+        drumKitContext: null,     // { trackIndex, noteNumber } when opened for drum kit; null otherwise
+        handlersAttached: false
     },
 
-    // Open file browser via JUCE resource provider
+    // Open file browser via JUCE resource provider (lazy — fetches one folder at a time)
     openJuceFileBrowser: async function() {
         try {
-            // Fetch the sample file list from the C++ backend
-            const response = await fetch('/api/sampleFileList.json');
-            if (!response.ok) {
-                console.error('Failed to fetch sample file list:', response.status);
-                // Fallback to native file input
-                document.getElementById('sampleFileInput').click();
-                return;
+            // Clear only the file selection; preserve last folder and expanded state
+            this.juceFileBrowser.selectedFile = null;
+
+            // First-time open: start at root
+            const isFirstOpen = Object.keys(this.juceFileBrowser.loadedFolders).length === 0;
+            if (isFirstOpen) {
+                this.juceFileBrowser.expandedFolders = new Set(['']);
+                this.juceFileBrowser.currentFolder = '';
             }
 
-            const data = await response.json();
-            if (!data.files || data.files.length === 0) {
+            // Fetch the current folder (root on first open, last visited folder otherwise)
+            const targetFolder = this.juceFileBrowser.currentFolder;
+            const data = await this.fetchFolderContents(targetFolder);
+            if (!data || (data.folders.length === 0 && data.files.length === 0 && targetFolder === '')) {
                 alert('No sample files found in the samples folder.');
                 return;
             }
 
-            // Store data and build folder tree
-            this.juceFileBrowser.files = data.files;
             this.juceFileBrowser.basePath = data.basePath;
-            this.juceFileBrowser.selectedFile = null;
-            this.buildFolderTree();
-
-            // Show the file browser dialog
             this.showJuceFileBrowserDialog();
         } catch (error) {
-            console.error('Error fetching sample file list:', error);
-            // Fallback to native file input
+            console.error('Error fetching sample folder:', error);
             document.getElementById('sampleFileInput').click();
         }
     },
 
-    // Build folder tree structure from file list
-    buildFolderTree: function() {
-        const tree = { __files__: [] };
+    // Fetch immediate children of a folder from C++ (with cache)
+    fetchFolderContents: async function(relativePath) {
+        const cache = this.juceFileBrowser.loadedFolders;
+        if (cache[relativePath]) return cache[relativePath];
 
-        this.juceFileBrowser.files.forEach(file => {
-            // Normalize path separators
-            const relativePath = file.relativePath.replace(/\\/g, '/');
-            const parts = relativePath.split('/');
-            const fileName = parts.pop();
+        const encoded = encodeURIComponent(relativePath);
+        const response = await fetch('/api/sampleFolderContents.json?path=' + encoded);
+        if (!response.ok) throw new Error('HTTP ' + response.status);
 
-            let current = tree;
-            let folderPath = '';
+        const data = await response.json();
+        // Normalise path separators (Windows back-slashes)
+        (data.folders || []).forEach(f => { f.relativePath = f.relativePath.replace(/\\/g, '/'); });
+        (data.files   || []).forEach(f => { f.relativePath = f.relativePath.replace(/\\/g, '/'); });
 
-            parts.forEach(part => {
-                folderPath = folderPath ? folderPath + '/' + part : part;
-                if (!current[part]) {
-                    current[part] = { __files__: [], __path__: folderPath };
-                }
-                current = current[part];
-            });
-
-            current.__files__.push(file);
-        });
-
-        this.juceFileBrowser.folderTree = tree;
-        this.juceFileBrowser.currentFolder = '';
-        this.juceFileBrowser.expandedFolders = new Set(['']);
+        cache[relativePath] = data;
+        return data;
     },
 
     // Show the JUCE file browser dialog
@@ -1876,8 +1862,8 @@ const SampleEditor = {
         // Render tree view
         this.renderJuceTreeView();
 
-        // Render file list for root
-        this.renderJuceFileList('');
+        // Render file list for last visited folder (or root on first open)
+        this.renderJuceFileList(this.juceFileBrowser.currentFolder);
 
         // Update open button state
         this.updateJuceOpenButton();
@@ -1921,20 +1907,17 @@ const SampleEditor = {
         }
     },
 
-    // Render tree view
+    // Render tree view from cache (non-recursive beyond what's loaded)
     renderJuceTreeView: function() {
         const treeContainer = document.getElementById('sampleFileBrowserTree');
         if (!treeContainer) return;
-
         treeContainer.innerHTML = '';
-
-        // Create root node
-        const rootNode = this.createJuceTreeNode('', 'samples', this.juceFileBrowser.folderTree);
+        const rootNode = this.createJuceTreeNode('', 'samples');
         treeContainer.appendChild(rootNode);
     },
 
-    // Create a tree node element
-    createJuceTreeNode: function(path, name, treeData) {
+    // Create a single tree node; children populated from loadedFolders cache
+    createJuceTreeNode: function(path, name) {
         const node = document.createElement('div');
         node.className = 'tree-node';
         node.dataset.path = path;
@@ -1942,29 +1925,28 @@ const SampleEditor = {
         const item = document.createElement('div');
         item.className = 'tree-item' + (path === this.juceFileBrowser.currentFolder ? ' active' : '');
 
-        // Check if has subfolders
-        const subfolders = Object.keys(treeData).filter(k => !k.startsWith('__'));
-        const hasChildren = subfolders.length > 0;
+        const cached   = this.juceFileBrowser.loadedFolders[path];
+        const isFetched = !!cached;
+        const isExpanded = this.juceFileBrowser.expandedFolders.has(path);
+        // Show expand arrow unless we've fetched and confirmed no subfolders
+        const showArrow = !isFetched || cached.folders.length > 0;
 
-        // Expand/collapse icon
         const expandIcon = document.createElement('span');
         expandIcon.className = 'tree-expand';
-        if (hasChildren) {
-            expandIcon.innerHTML = this.juceFileBrowser.expandedFolders.has(path) ? '▼' : '▶';
+        if (showArrow) {
+            expandIcon.innerHTML = isExpanded ? '▼' : '▶';
             expandIcon.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.toggleJuceFolder(path, node, treeData);
+                this.toggleJuceFolder(path, node);
             });
         } else {
             expandIcon.innerHTML = '&nbsp;';
         }
 
-        // Folder icon
         const folderIcon = document.createElement('span');
         folderIcon.className = 'tree-icon';
         folderIcon.innerHTML = '📁';
 
-        // Folder name
         const nameSpan = document.createElement('span');
         nameSpan.className = 'tree-name';
         nameSpan.textContent = name;
@@ -1973,129 +1955,118 @@ const SampleEditor = {
         item.appendChild(folderIcon);
         item.appendChild(nameSpan);
 
-        // Click to select folder
-        item.addEventListener('click', () => {
-            this.selectJuceFolder(path);
-        });
-
-        // Double-click to expand
-        item.addEventListener('dblclick', () => {
-            if (hasChildren) {
-                this.toggleJuceFolder(path, node, treeData);
-            }
-        });
+        item.addEventListener('click', () => this.selectJuceFolder(path));
+        item.addEventListener('dblclick', () => { if (showArrow) this.toggleJuceFolder(path, node); });
 
         node.appendChild(item);
 
         // Children container
         const children = document.createElement('div');
         children.className = 'tree-children';
-        children.style.display = this.juceFileBrowser.expandedFolders.has(path) ? 'block' : 'none';
+        children.style.display = isExpanded ? 'block' : 'none';
 
-        // Add child folders if expanded
-        if (this.juceFileBrowser.expandedFolders.has(path)) {
-            subfolders.sort().forEach(subfolder => {
-                const childPath = path ? path + '/' + subfolder : subfolder;
-                const childNode = this.createJuceTreeNode(childPath, subfolder, treeData[subfolder]);
-                children.appendChild(childNode);
-            });
+        if (isExpanded) {
+            if (isFetched) {
+                cached.folders.forEach(sub => {
+                    children.appendChild(this.createJuceTreeNode(sub.relativePath, sub.name));
+                });
+            } else {
+                children.innerHTML = '<div style="padding-left:20px;color:#666;font-size:11px">...</div>';
+            }
         }
 
         node.appendChild(children);
-
         return node;
     },
 
-    // Toggle folder expand/collapse
-    toggleJuceFolder: function(path, node, treeData) {
-        const children = node.querySelector('.tree-children');
-        const expandIcon = node.querySelector('.tree-expand');
+    // Toggle folder expand/collapse; fetches contents lazily
+    toggleJuceFolder: async function(path, node) {
+        const children  = node.querySelector('.tree-children');
+        const expandIcon = node.querySelector(':scope > .tree-item > .tree-expand');
+        const isExpanded = this.juceFileBrowser.expandedFolders.has(path);
 
-        if (this.juceFileBrowser.expandedFolders.has(path)) {
+        if (isExpanded) {
             this.juceFileBrowser.expandedFolders.delete(path);
             children.style.display = 'none';
-            expandIcon.innerHTML = '▶';
+            if (expandIcon) expandIcon.innerHTML = '▶';
         } else {
             this.juceFileBrowser.expandedFolders.add(path);
             children.style.display = 'block';
-            expandIcon.innerHTML = '▼';
+            if (expandIcon) expandIcon.innerHTML = '▼';
 
-            // Populate children if empty
-            if (children.children.length === 0) {
-                const subfolders = Object.keys(treeData).filter(k => !k.startsWith('__'));
-                subfolders.sort().forEach(subfolder => {
-                    const childPath = path ? path + '/' + subfolder : subfolder;
-                    const childNode = this.createJuceTreeNode(childPath, subfolder, treeData[subfolder]);
-                    children.appendChild(childNode);
-                });
+            // Show placeholder while fetching
+            if (!this.juceFileBrowser.loadedFolders[path]) {
+                children.innerHTML = '<div style="padding-left:20px;color:#666;font-size:11px">...</div>';
             }
+
+            const data = await this.fetchFolderContents(path);
+
+            // Update arrow if no subfolders
+            if (data.folders.length === 0 && expandIcon) {
+                expandIcon.innerHTML = '&nbsp;';
+                expandIcon.style.cursor = 'default';
+            }
+
+            // Populate child nodes
+            children.innerHTML = '';
+            data.folders.forEach(sub => {
+                children.appendChild(this.createJuceTreeNode(sub.relativePath, sub.name));
+            });
+
+            // Navigate file list to this folder
+            await this.selectJuceFolder(path);
         }
     },
 
-    // Select folder in tree
-    selectJuceFolder: function(path) {
+    // Select folder in tree (async — fetches folder contents on demand)
+    selectJuceFolder: async function(path) {
         this.juceFileBrowser.currentFolder = path;
         this.juceFileBrowser.selectedFile = null;
 
         // Update tree active state
-        document.querySelectorAll('#sampleFileBrowserTree .tree-item').forEach(item => {
-            item.classList.remove('active');
-        });
+        document.querySelectorAll('#sampleFileBrowserTree .tree-item').forEach(el => el.classList.remove('active'));
         const activeNode = document.querySelector(`#sampleFileBrowserTree .tree-node[data-path="${CSS.escape(path)}"]`);
         if (activeNode) {
             const activeItem = activeNode.querySelector(':scope > .tree-item');
-            if (activeItem) {
-                activeItem.classList.add('active');
-            }
+            if (activeItem) activeItem.classList.add('active');
         }
 
         // Update path display
         const pathDisplay = document.getElementById('sampleFileBrowserPath');
-        if (pathDisplay) {
-            pathDisplay.textContent = path ? 'samples/' + path : 'samples';
-        }
+        if (pathDisplay) pathDisplay.textContent = path ? 'samples/' + path : 'samples';
 
-        // Render file list
-        this.renderJuceFileList(path);
+        // Render file list (fetches if not cached)
+        await this.renderJuceFileList(path);
         this.updateJuceOpenButton();
     },
 
-    // Render file list for current folder
-    renderJuceFileList: function(folderPath) {
+    // Render file list for a folder; fetches from C++ if not yet cached
+    renderJuceFileList: async function(folderPath) {
         const fileList = document.getElementById('sampleFileBrowserFiles');
         if (!fileList) return;
 
-        fileList.innerHTML = '';
-
-        // Navigate to the folder in tree
-        let treeData = this.juceFileBrowser.folderTree;
-        if (folderPath) {
-            const parts = folderPath.split('/');
-            for (const part of parts) {
-                if (treeData[part]) {
-                    treeData = treeData[part];
-                } else {
-                    treeData = { __files__: [] };
-                    break;
-                }
-            }
+        // Show loading state while fetching
+        if (!this.juceFileBrowser.loadedFolders[folderPath]) {
+            fileList.innerHTML = '<div class="file-empty" style="color:#666">Loading...</div>';
         }
 
-        // Get subfolders and files
-        const subfolders = Object.keys(treeData).filter(k => !k.startsWith('__')).sort();
-        const files = (treeData.__files__ || []).sort((a, b) => a.name.localeCompare(b.name));
+        const data = await this.fetchFolderContents(folderPath);
+        fileList.innerHTML = '';
 
-        if (subfolders.length === 0 && files.length === 0) {
+        const folders = (data.folders || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+        const files   = (data.files   || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+
+        if (folders.length === 0 && files.length === 0) {
             fileList.innerHTML = '<div class="file-empty">Empty folder</div>';
             return;
         }
 
         // Add subfolders first
-        subfolders.forEach(subfolder => {
+        folders.forEach(subfolder => {
             const item = document.createElement('div');
             item.className = 'file-item folder';
             item.dataset.isDirectory = 'true';
-            item.dataset.path = folderPath ? folderPath + '/' + subfolder : subfolder;
+            item.dataset.path = subfolder.relativePath;
 
             const icon = document.createElement('span');
             icon.className = 'file-icon';
@@ -2103,18 +2074,17 @@ const SampleEditor = {
 
             const name = document.createElement('span');
             name.className = 'file-name';
-            name.textContent = subfolder;
+            name.textContent = subfolder.name;
 
             item.appendChild(icon);
             item.appendChild(name);
 
-            // Double-click to navigate
-            item.addEventListener('dblclick', () => {
-                const newPath = folderPath ? folderPath + '/' + subfolder : subfolder;
+            // Double-click to navigate into subfolder
+            item.addEventListener('dblclick', async () => {
                 this.juceFileBrowser.expandedFolders.add(folderPath);
-                this.juceFileBrowser.expandedFolders.add(newPath);
+                this.juceFileBrowser.expandedFolders.add(subfolder.relativePath);
+                await this.selectJuceFolder(subfolder.relativePath);
                 this.renderJuceTreeView();
-                this.selectJuceFolder(newPath);
             });
 
             fileList.appendChild(item);
@@ -2170,8 +2140,16 @@ const SampleEditor = {
     // Confirm file selection
     confirmJuceFileSelection: function() {
         if (this.juceFileBrowser.selectedFile) {
+            const filePath = this.juceFileBrowser.selectedFile.fullPath;
+            const ctx = this.juceFileBrowser.drumKitContext;
             this.hideJuceFileBrowserDialog();
-            this.loadSampleFromJuce(this.juceFileBrowser.selectedFile.fullPath);
+
+            if (ctx) {
+                // Drum kit mode: copy to drumkit/ folder with deterministic name
+                this.copyDrumKitSampleViaJuce(filePath, ctx);
+            } else {
+                this.loadSampleFromJuce(filePath);
+            }
         }
     },
 
@@ -2180,6 +2158,31 @@ const SampleEditor = {
         const modal = document.getElementById('sampleFileBrowserModal');
         if (modal) {
             modal.style.display = 'none';
+        }
+        // Clear drum kit context and restore default title
+        this.juceFileBrowser.drumKitContext = null;
+        const titleEl = document.querySelector('#sampleFileBrowserModal .file-browser-title');
+        if (titleEl) titleEl.textContent = 'Select Sample';
+    },
+
+    // Open the JUCE file browser specifically for drum kit note assignment
+    openJuceFileBrowserForDrumKit: function(trackIndex, noteNumber) {
+        this.juceFileBrowser.drumKitContext = { trackIndex, noteNumber };
+        // Update dialog title to reflect drum kit context
+        const titleEl = document.querySelector('#sampleFileBrowserModal .file-browser-title');
+        if (titleEl) titleEl.textContent = 'Select Sample for Note ' + noteNumber;
+        this.openJuceFileBrowser();
+    },
+
+    // Send drum kit sample copy request to C++ (copies to drumkit/ folder, loads into plugin)
+    copyDrumKitSampleViaJuce: function(sourcePath, ctx) {
+        if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
+            AudioBridge.send('copyDrumKitSampleToProject', {
+                sourcePath: sourcePath,
+                trackIndex: ctx.trackIndex,
+                noteNumber: ctx.noteNumber,
+                velocity: 100
+            });
         }
     },
 

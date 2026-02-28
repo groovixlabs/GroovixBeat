@@ -209,9 +209,10 @@ const FxChain = {
 
         const filterLower = filter.toLowerCase();
         const filtered = this.availablePlugins.filter(plugin => {
-            // Only show effect plugins (not instruments/synths)
+            // Exclude instruments, synths, and I/O devices; keep effects (including internal ones like Reverb)
             const isEffect = plugin.category !== 'Synth' &&
                              plugin.category !== 'Instrument' &&
+                             plugin.category !== 'I/O Devices' &&
                              !plugin.isInstrument;
 
             const matchesFilter = !filter ||
@@ -276,7 +277,7 @@ const FxChain = {
 
     // Select an available plugin
     selectAvailable: function(pluginId) {
-        this.selectedAvailable = pluginId;
+        this.selectedAvailable = String(pluginId);
 
         // Update UI
         const container = document.getElementById('fxAvailablePlugins');
@@ -304,8 +305,10 @@ const FxChain = {
     addToChain: function() {
         if (this.selectedAvailable === null) return;
 
+        // Compare as strings — plugin.id may be a number (JUCE uniqueId) while
+        // selectedAvailable is always a string from the HTML dataset attribute.
         const plugin = this.availablePlugins.find(p =>
-            (p.id || p.name) === this.selectedAvailable
+            String(p.id || p.name) === this.selectedAvailable
         );
 
         if (!plugin) return;

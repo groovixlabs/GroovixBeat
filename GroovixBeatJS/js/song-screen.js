@@ -36,6 +36,10 @@ const SongScreen = {
     createGrid: function() {
         this.renderGrid();
         this.attachControls();
+        
+        document.getElementById('addSceneBtn').addEventListener('click', () => this.handleAddScene());
+        document.getElementById('addTrackBtn').addEventListener('click', () => this.handleAddTrack());
+        
     },
 
     // Render the entire grid
@@ -71,12 +75,16 @@ const SongScreen = {
         }
 
         // Add track button in header
+        /*
         const addTrackBtn = document.createElement('button');
         addTrackBtn.className = 'add-btn add-track-btn';
         addTrackBtn.innerHTML = '+';
         addTrackBtn.title = 'Add Track';
         addTrackBtn.addEventListener('click', () => this.handleAddTrack());
-        header.appendChild(addTrackBtn);
+        */
+        //header.appendChild(addTrackBtn);
+        //document.getElementById('song-toolbar').appendChild(addTrackBtn);
+
     },
 
     // Render scene labels column
@@ -105,6 +113,7 @@ const SongScreen = {
             grid.appendChild(wrapper);
 
             // Add scene button row
+            /*
             const addSceneRow = document.createElement('div');
             addSceneRow.className = 'add-scene-row';
             const addSceneBtn = document.createElement('button');
@@ -113,6 +122,7 @@ const SongScreen = {
             addSceneBtn.addEventListener('click', () => this.handleAddScene());
             addSceneRow.appendChild(addSceneBtn);
             grid.appendChild(addSceneRow);
+            */
         }
 
         labelsContainer.innerHTML = '';
@@ -147,7 +157,11 @@ const SongScreen = {
             playBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 if (this.settingsMode) return;
-                AudioBridge.playSceneByIndex(row);
+                if (AudioBridge.liveMode) {
+                    AudioBridge.queueLiveScene(row);
+                } else {
+                    AudioBridge.playSceneByIndex(row);
+                }
             });
             labelContainer.appendChild(playBtn);
 
@@ -454,6 +468,15 @@ const SongScreen = {
                 let playheadX = -1;
                 const clip = AppState.getClip(row, col);
                 const clipLength = (clip && clip.length) || 64;
+                const trackSettings = AppState.getTrackSettings(col);
+
+                // Skip empty clips — no playhead on clips without content
+                const isSampleTrack = trackSettings.trackType === 'sample';
+                const hasContent = isSampleTrack
+                    ? (typeof SampleEditor !== 'undefined' &&
+                       (() => { const s = SampleEditor.getClipSample(row, col); return s && (s.fullPath || s.fileName); })())
+                    : (clip.notes && clip.notes.length > 0);
+                if (!hasContent) continue;
 
                 // Scene playback
                 if (AudioBridge.playingSceneIndex === row &&
@@ -936,6 +959,26 @@ const SongScreen = {
         this.currentPropsClip = { scene: -1, track: -1 };
     },
 
+    // Clear the current clip (notes + sample)
+    clearCurrentClip: function() {
+        if (this.currentPropsClip.scene < 0) return;
+
+        const { scene, track } = this.currentPropsClip;
+        const clip = AppState.clips[scene][track];
+
+        // Clear MIDI notes
+        clip.notes = [];
+
+        // Clear sample
+        if (typeof SampleEditor !== 'undefined') {
+            const key = `${scene}_${track}`;
+            SampleEditor.clipSamples[key] = null;
+        }
+
+        this.closeClipProperties();
+        this.renderCanvas();
+    },
+
     // Save clip properties
     saveClipProperties: function() {
         if (this.currentPropsClip.scene < 0) return;
@@ -1160,6 +1203,7 @@ const SongScreen = {
         document.getElementById('clipPropsClose').addEventListener('click', () => this.closeClipProperties());
         document.getElementById('clipPropsCancel').addEventListener('click', () => this.closeClipProperties());
         document.getElementById('clipPropsSave').addEventListener('click', () => this.saveClipProperties());
+        document.getElementById('clipPropsClear').addEventListener('click', () => this.clearCurrentClip());
 
         document.getElementById('clipPropsOverlay').addEventListener('click', (e) => {
             if (e.target === document.getElementById('clipPropsOverlay')) {
@@ -1542,6 +1586,103 @@ const SongScreen = {
 
             container.appendChild(channel);
         }
+
+        // --- Master Mixer strip (always last) ---
+        const masterState = AppState.masterMixerState;
+        const masterChannel = document.createElement('div');
+        masterChannel.className = 'song-mixer-channel song-mixer-master';
+
+        const masterColorBar = document.createElement('div');
+        masterColorBar.className = 'channel-color';
+        masterColorBar.style.background = '#d5a865'; // gold accent
+        masterChannel.appendChild(masterColorBar);
+
+        const masterName = document.createElement('div');
+        masterName.className = 'channel-name';
+        masterName.textContent = 'Master';
+        masterChannel.appendChild(masterName);
+
+        const masterButtons = document.createElement('div');
+        masterButtons.className = 'channel-buttons';
+
+        const masterMuteBtn = document.createElement('button');
+        masterMuteBtn.className = 'channel-btn mute-btn' + (masterState.mute ? ' active' : '');
+        masterMuteBtn.textContent = 'M';
+        masterMuteBtn.title = 'Mute Master';
+        masterMuteBtn.addEventListener('click', () => this.toggleMasterMute());
+        masterButtons.appendChild(masterMuteBtn);
+
+        masterChannel.appendChild(masterButtons);
+
+        const masterPanContainer = document.createElement('div');
+        masterPanContainer.className = 'pan-container';
+
+        const masterPanLabel = document.createElement('div');
+        masterPanLabel.className = 'pan-label';
+        masterPanLabel.textContent = 'Pan';
+        masterPanContainer.appendChild(masterPanLabel);
+
+        const masterPanKnob = document.createElement('div');
+        masterPanKnob.className = 'pan-knob';
+        const masterPanIndicator = document.createElement('div');
+        masterPanIndicator.className = 'pan-indicator';
+        const masterPanRotation = masterState.pan * 135;
+        masterPanIndicator.style.transform = `translate(-50%, -100%) rotate(${masterPanRotation}deg)`;
+        masterPanKnob.appendChild(masterPanIndicator);
+        masterPanKnob.addEventListener('mousedown', (e) => this.startMasterPanDrag(e));
+        masterPanContainer.appendChild(masterPanKnob);
+
+        const masterPanValue = document.createElement('div');
+        masterPanValue.className = 'pan-value';
+        masterPanValue.id = 'songPanValue-master';
+        masterPanValue.textContent = this.formatPanValue(masterState.pan);
+        masterPanContainer.appendChild(masterPanValue);
+
+        masterChannel.appendChild(masterPanContainer);
+
+        const masterFaderContainer = document.createElement('div');
+        masterFaderContainer.className = 'fader-container';
+
+        const masterLevelMeterL = document.createElement('div');
+        masterLevelMeterL.className = 'level-meter';
+        const masterLevelFillL = document.createElement('div');
+        masterLevelFillL.className = 'level-fill';
+        masterLevelFillL.id = 'songLevelL-master';
+        masterLevelFillL.style.height = `${masterState.levelL * 100}%`;
+        masterLevelMeterL.appendChild(masterLevelFillL);
+        masterFaderContainer.appendChild(masterLevelMeterL);
+
+        const masterSliderContainer = document.createElement('div');
+        masterSliderContainer.className = 'volume-slider-container';
+        const masterVolumeSlider = document.createElement('input');
+        masterVolumeSlider.type = 'range';
+        masterVolumeSlider.className = 'volume-slider';
+        masterVolumeSlider.id = 'songVolume-master';
+        masterVolumeSlider.min = 0;
+        masterVolumeSlider.max = 100;
+        masterVolumeSlider.value = masterState.volume * 100;
+        masterVolumeSlider.addEventListener('input', (e) => this.handleMasterVolumeChange(e.target.value / 100));
+        masterSliderContainer.appendChild(masterVolumeSlider);
+        masterFaderContainer.appendChild(masterSliderContainer);
+
+        const masterLevelMeterR = document.createElement('div');
+        masterLevelMeterR.className = 'level-meter';
+        const masterLevelFillR = document.createElement('div');
+        masterLevelFillR.className = 'level-fill';
+        masterLevelFillR.id = 'songLevelR-master';
+        masterLevelFillR.style.height = `${masterState.levelR * 100}%`;
+        masterLevelMeterR.appendChild(masterLevelFillR);
+        masterFaderContainer.appendChild(masterLevelMeterR);
+
+        masterChannel.appendChild(masterFaderContainer);
+
+        const masterVolumeValue = document.createElement('div');
+        masterVolumeValue.className = 'volume-value';
+        masterVolumeValue.id = 'songVolumeValue-master';
+        masterVolumeValue.textContent = this.formatVolumeValue(masterState.volume);
+        masterChannel.appendChild(masterVolumeValue);
+
+        container.appendChild(masterChannel);
     },
 
     toggleMixerMute: function(trackIndex) {
@@ -1619,6 +1760,54 @@ const SongScreen = {
         this.panDragState = null;
         document.removeEventListener('mousemove', this.boundPanDrag);
         document.removeEventListener('mouseup', this.boundPanDragEnd);
+    },
+
+    // --- Master Mixer controls ---
+
+    toggleMasterMute: function() {
+        AppState.masterMixerState.mute = !AppState.masterMixerState.mute;
+        this.renderSongMixer();
+        if (typeof AudioBridge !== 'undefined') {
+            AudioBridge.updateMasterMixerState();
+        }
+    },
+
+    handleMasterVolumeChange: function(volume) {
+        AppState.masterMixerState.volume = volume;
+        const valueDisplay = document.getElementById('songVolumeValue-master');
+        if (valueDisplay) {
+            valueDisplay.textContent = this.formatVolumeValue(volume);
+        }
+        if (typeof AudioBridge !== 'undefined') {
+            AudioBridge.updateMasterMixerState();
+        }
+    },
+
+    startMasterPanDrag: function(e) {
+        e.preventDefault();
+        this.masterPanDragState = {
+            startX: e.clientX,
+            startY: e.clientY,
+            startPan: AppState.masterMixerState.pan
+        };
+        const onMove = (ev) => {
+            const deltaX = ev.clientX - this.masterPanDragState.startX;
+            const deltaY = this.masterPanDragState.startY - ev.clientY;
+            const delta = (deltaX + deltaY) / 100;
+            let newPan = Math.max(-1, Math.min(1, this.masterPanDragState.startPan + delta));
+            AppState.masterMixerState.pan = newPan;
+            this.renderSongMixer();
+            if (typeof AudioBridge !== 'undefined') {
+                AudioBridge.updateMasterMixerState();
+            }
+        };
+        const onUp = () => {
+            this.masterPanDragState = null;
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
     },
 
     formatPanValue: function(pan) {

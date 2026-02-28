@@ -1,7 +1,7 @@
 "use strict"
 
 /*
-# GridDJ User Manual
+# GR User Manual
 
 Welcome to GridDJ user Manual
 
@@ -301,10 +301,12 @@ class CNoteParser {
             i++;
         }
 
+        /*
         if ((i + 1 < input.length) && (input[i + 1] >= "0" && input[i + 1] <= "9")) {
             octave_t = gParseInt((input[i + 1]) ,octave); // Capture Octave
             i++;
         }
+        */
 
         //console.log(i,input[i]);
 

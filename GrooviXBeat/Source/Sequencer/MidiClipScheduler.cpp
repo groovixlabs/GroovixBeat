@@ -425,6 +425,47 @@ void MidiClipScheduler::setLiveMode(bool enabled)
 }
 
 //==============================================================================
+// Song Mode
+
+void MidiClipScheduler::setSongSceneEndSteps(double steps)
+{
+    juce::SpinLock::ScopedLockType sl(lock);
+    songSceneEndSteps = steps;
+    sceneAdvancePending.store(false, std::memory_order_relaxed);
+}
+
+void MidiClipScheduler::setSongMode(bool enabled)
+{
+    juce::SpinLock::ScopedLockType sl(lock);
+    inSongMode = enabled;
+    if (!enabled)
+        songSceneEndSteps = 0.0;
+}
+
+bool MidiClipScheduler::consumeSceneAdvancePending()
+{
+    return sceneAdvancePending.exchange(false, std::memory_order_acq_rel);
+}
+
+void MidiClipScheduler::adjustPlayStartForSceneTransition(double stepsToAdvance)
+{
+    juce::SpinLock::ScopedLockType sl(lock);
+
+    if (playStartSample >= 0 && sampleRate > 0.0 && tempo > 0.0)
+    {
+        int64_t advance = static_cast<int64_t>(stepsToAdvance * getSamplesPerStep());
+        playStartSample += advance;
+        pausedPositionSteps = 0.0;
+
+        for (auto& pair : trackPlayStates)
+            pair.second.oneshotFinished = false;
+
+        DBG("MidiClipScheduler::adjustPlayStartForSceneTransition - advanced " +
+            juce::String(stepsToAdvance) + " steps");
+    }
+}
+
+//==============================================================================
 // Audio thread API
 
 void MidiClipScheduler::prepareToPlay(double newSampleRate)
@@ -444,6 +485,41 @@ void MidiClipScheduler::renderTrackBlock(int trackIndex, juce::MidiBuffer& outpu
 
     // Update latest audio position (all tracks report same value, no conflict)
     latestAudioPosition.store(blockStartSample + numSamples, std::memory_order_relaxed);
+
+    // Resolve playStartSample early for non-live (global/song) mode.
+    // Sample-only tracks never call setClip so they are never added to trackPlayStates
+    // and early-return below before the per-track global-mode resolution code.
+    // Without this early resolution, playStartSample stays -1 and the scene-end
+    // detection condition (playStartSample >= 0) never fires for sample-only scenes.
+    if (!inLiveMode && playing && playStartSample < 0)
+        playStartSample = blockStartSample - static_cast<int64_t>(pausedPositionSteps * getSamplesPerStep());
+
+    // Song Mode: detect scene-end boundary (sample-accurate).
+    // When the playhead crosses songSceneEndSteps, set sceneAdvancePending so the
+    // message-thread timer can swap in the next scene's clip data within ~1ms.
+    // Only the first track to detect the crossing fires the flag (atomic exchange).
+    if (inSongMode && songSceneEndSteps > 0.0 && playing && playStartSample >= 0 && !inLiveMode)
+    {
+        double samplesPerStepLocal = getSamplesPerStep();
+        if (samplesPerStepLocal > 0.0)
+        {
+            double blockEndStep = static_cast<double>(blockStartSample + numSamples - playStartSample)
+                                  / samplesPerStepLocal;
+            if (blockEndStep >= songSceneEndSteps)
+            {
+                if (!sceneAdvancePending.exchange(true, std::memory_order_acq_rel))
+                {
+                    // Send all-notes-off on all tracks so no stale notes bleed into new scene
+                    for (auto& pair : trackPlayStates)
+                        pair.second.needsAllNotesOff = true;
+
+                    // Disable further detection until message thread re-arms for next scene
+                    inSongMode = false;
+                    songSceneEndSteps = 0.0;
+                }
+            }
+        }
+    }
 
     // In Live Mode the global-transport else-branch never runs, so resolve playStartSample
     // here so getPlayheadPositionBeats() returns valid values for sample boundary detection.

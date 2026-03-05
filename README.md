@@ -100,6 +100,7 @@ GrooviXBeat is a powerful desktop groovebox and digital audio workstation (DAW) 
 
 [ToneJS Midi](https://github.com/Tonejs/Midi)
 
+[Drump Patterns](https://github.com/stephenhandley/DrumMachinePatterns)
 
 #### Licence: 
 Please refer to JUCE Licence for their Licence terms https://juce.com/get-juce/

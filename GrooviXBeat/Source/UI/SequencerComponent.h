@@ -43,6 +43,7 @@ class GraphDocumentComponent;
 #include "../Sequencer/SampleEditorBridge.h"
 #include "../Sequencer/MidiTrackOutputManager.h"
 #include "../Sequencer/SamplerInstrumentManager.h"
+#include "../Sequencer/DrumKitManager.h"
 #include "../Plugins/TrackMixerPlugin.h"
 
 //==============================================================================
@@ -135,6 +136,15 @@ private:
     // Setup sampler instruments for tracks
     void setupSamplerInstrumentsForTracks(int numTracks);
 
+    // Re-wire a single track to use its SamplerInstrumentPlugin (called when switching to sampled_instrument type)
+    void setupSamplerTrack(int trackIndex);
+
+    // Wire a track to its DrumKitPlugin (called when switching to drum_kit type)
+    void setupDrumKitTrack(int trackIndex);
+
+    // Setup the master mixer node (inserted between all track mixers and the audio output)
+    void setupMasterMixer();
+
     GraphDocumentComponent& graphDocument;
     PluginGraph& pluginGraph;
     std::unique_ptr<CustomWebBrowser> webBrowser;
@@ -145,6 +155,7 @@ private:
     SampleEditorBridge sampleEditorBridge;
     MidiTrackOutputManager midiTrackOutputManager;
     SamplerInstrumentManager samplerInstrumentManager;
+    DrumKitManager drumKitManager;
 
     // Track the sample player nodes in the graph
     std::map<int, juce::AudioProcessorGraph::NodeID> samplePlayerNodes;
@@ -161,9 +172,20 @@ private:
     // Sampler instrument plugin nodes per track
     std::map<int, juce::AudioProcessorGraph::NodeID> samplerInstrumentNodes;
 
+    // FX chain nodes per track (owned by graph, tracked for removal on re-apply)
+    std::map<int, std::vector<juce::AudioProcessorGraph::NodeID>> trackFxChainNodes;
+
+    // DrumKit plugin nodes per track
+    std::map<int, juce::AudioProcessorGraph::NodeID> drumKitNodes;
+
     // Track mixer plugin nodes per track (for MIDI track volume/pan/mute/solo)
     std::map<int, juce::AudioProcessorGraph::NodeID> trackMixerNodes;
     std::map<int, TrackMixerPlugin*> trackMixerPlugins;  // Raw pointers to mixer plugins (owned by graph)
+
+    // Master mixer node (sits between all track mixers and the audio output)
+    juce::AudioProcessorGraph::NodeID masterMixerNodeId;
+    TrackMixerPlugin* masterMixerPlugin = nullptr;
+    bool masterMixerCreated = false;
 
     // Mixer state per track
     struct MixerState

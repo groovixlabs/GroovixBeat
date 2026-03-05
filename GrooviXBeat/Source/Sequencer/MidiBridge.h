@@ -77,6 +77,7 @@ public:
     void queueSampleFile(int trackIndex, const juce::String& filePath, double offset = 0.0);
     void queueSampleFileSeamless(int trackIndex, const juce::String& filePath, double offset, bool loop, double loopLengthBeats);
     void queueStopSample(int trackIndex);
+    void cancelQueuedSample(int trackIndex);
     void triggerSampleScene(int sceneIndex, const juce::var& clipsArray);
 
     //==============================================================================
@@ -93,6 +94,35 @@ public:
 
     /** Enter or exit live mode. In live mode, global transport does not trigger MIDI rendering. */
     void setLiveMode(bool enabled);
+
+    //==============================================================================
+    // Song Mode - C++ drives scene transitions; JS only supplies data and updates UI
+
+    /**
+     * Tell the clip scheduler how long the current scene lasts (in beats).
+     * The audio thread detects the boundary and signals the message-thread timer,
+     * which calls advanceSongScene() to swap clip data for the next scene.
+     */
+    void setSongSceneDuration(double beats);
+
+    /**
+     * Pre-queue the NEXT scene's data so advanceSongScene() can load it instantly.
+     * midiClipsArray: [{trackIndex, notes[], loopLength, program, isDrum, loop}]
+     * sampleFilesArray: [{trackIndex, filePath, offset, loop, loopLengthBeats}]
+     */
+    void preQueueSongScene(int sceneIndex,
+                           const juce::var& midiClipsArray,
+                           const juce::var& sampleFilesArray,
+                           double durationBeats);
+
+    /** Stop song-mode scene tracking (call when song playback stops). */
+    void stopSongMode();
+
+    /**
+     * Register a callback that fires on the message thread when a scene advance
+     * completes.  sceneIndex = new scene index, or -1 when the song ends.
+     */
+    void setSongSceneChangedCallback(std::function<void(int)> callback);
 
     //==============================================================================
     // Quantization settings
@@ -147,6 +177,31 @@ private:
     juce::CriticalSection eventLock;
 
     double getCurrentTime() const;
+
+    // Song Mode helpers
+    void advanceSongScene();
+
+    // Song Mode state
+    bool inSongMode = false;
+    double currentSongSceneDurationBeats = 0.0;
+    double songSceneStartTime = 0.0;   // wall-clock time when current scene started
+    int songNextSceneIndex = -1;
+    double songNextSceneDurationBeats = 0.0;
+    bool songHasNextScene = false;
+
+    std::function<void(int)> songSceneChangedCallback;
+
+    struct SongSampleClip
+    {
+        int trackIndex;
+        juce::String filePath;
+        double offset;
+        bool loop;
+        double loopLengthBeats;
+    };
+
+    std::vector<SongSampleClip> nextSceneSamples;
+    juce::var nextSceneMidiClipsVar;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MidiBridge)
 };

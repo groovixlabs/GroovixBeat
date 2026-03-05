@@ -349,6 +349,11 @@ void SamplePlayerPlugin::cancelQueue()
 
     queuedToPlay = false;
     queuedToStop = false;
+
+    // Also disarm audio-thread targets so pending file never fires
+    targetStartSample.store(-1, std::memory_order_relaxed);
+    targetStopSample.store(-1, std::memory_order_relaxed);
+    hasPendingFile = false;
 }
 
 void SamplePlayerPlugin::setLoopLengthBeats(double beats)

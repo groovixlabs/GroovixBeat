@@ -23,6 +23,7 @@ SamplerInstrumentPlugin* SamplerInstrumentManager::createInstrumentForTrack(int 
     juce::ScopedLock sl(lock);
 
     auto* plugin = new SamplerInstrumentPlugin();
+    plugin->setTrackIndex(trackIndex);
     trackInstruments[trackIndex] = plugin;
 
     DBG("SamplerInstrumentManager: Created instrument for track " + juce::String(trackIndex));
@@ -35,6 +36,7 @@ void SamplerInstrumentManager::registerInstrumentForTrack(int trackIndex, Sample
 
     if (plugin != nullptr)
     {
+        plugin->setTrackIndex(trackIndex);
         trackInstruments[trackIndex] = plugin;
         DBG("SamplerInstrumentManager: Registered instrument for track " + juce::String(trackIndex));
     }

@@ -33,9 +33,13 @@ public:
     bool isLoaded() const;
 
     //==============================================================================
-    // AudioProcessor Implementation
+    // Track index
+    void setTrackIndex(int index) { trackIndex = index; }
+    int getTrackIndex() const { return trackIndex; }
 
-    const juce::String getName() const override { return "Sampler Instrument"; }
+    //==============================================================================
+    // AudioProcessor Implementation
+    const juce::String getName() const override { return "SampInst:" + juce::String(trackIndex + 1); }
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -139,6 +143,9 @@ private:
 
     // Audio format manager for decoding MP3
     juce::AudioFormatManager formatManager;
+
+    // Track index this plugin is assigned to
+    int trackIndex = -1;
 
     // Current device sample rate
     double deviceSampleRate = 44100.0;

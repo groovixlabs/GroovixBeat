@@ -149,6 +149,30 @@ public:
                           std::vector<PendingVstParam>* vstParamOutput = nullptr);
 
     //==============================================================================
+    // Song Mode - sample-accurate scene-end detection (audio thread sets flag,
+    // message thread consumes it and swaps clip data for the next scene).
+
+    /** Set when current scene ends (in 1/16th-note steps from current playStartSample). */
+    void setSongSceneEndSteps(double steps);
+
+    /** Enable or disable song-mode scene-end detection. */
+    void setSongMode(bool enabled);
+
+    /**
+     * Called from the message thread (MidiBridge timer) to check whether the
+     * audio thread fired the scene-end event.  Returns true once and resets the
+     * flag so subsequent calls return false until the next scene end.
+     */
+    bool consumeSceneAdvancePending();
+
+    /**
+     * Advance playStartSample by stepsToAdvance so the next scene renders
+     * from step 0.  Called from the message thread right after consuming the
+     * scene-advance flag.
+     */
+    void adjustPlayStartForSceneTransition(double stepsToAdvance);
+
+    //==============================================================================
     // Timing queries (safe to call from any thread)
 
     double getPlayheadPositionSteps() const;
@@ -211,6 +235,11 @@ private:
     int quantizeSteps = 16;         // Quantize size in 1/16th notes (default: 1 bar)
     int64_t liveAnchorSample = -1;  // Sample position when first live clip started (-1 = not set)
     bool inLiveMode = false;        // When true, global transport does not trigger MIDI rendering
+
+    // Song Mode - scene-end detection
+    bool inSongMode = false;
+    double songSceneEndSteps = 0.0;          // Steps (from playStartSample) when current scene ends
+    std::atomic<bool> sceneAdvancePending { false };  // Set by audio thread, consumed by message thread
 
     // SpinLock is lighter than CriticalSection for audio thread use
     // (no OS calls, just atomic compare-and-swap)

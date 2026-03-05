@@ -341,6 +341,11 @@ function OnChangeDrumPatternName()
 {
     let drumpattern=$("#DrumPatternName").val();
     $("#DrumPatternStyle").html(dp.GetDrumPattern(drumpattern));
+
+    let drumstyle=$("#DrumPatternStyle").val();
+    
+    $("#DrumPatternTable").html(dp.GetDrumPatternStyle(drumpattern,drumstyle));
+    $("#DrumWizardText").val(dp.GetDrumPatternRaw(drumpattern,drumstyle));
 }
 
 function OnChangeDrumPatternStyle()
@@ -349,6 +354,7 @@ function OnChangeDrumPatternStyle()
     let drumstyle=$("#DrumPatternStyle").val();
     
     $("#DrumPatternTable").html(dp.GetDrumPatternStyle(drumpattern,drumstyle));
+    $("#DrumWizardText").val(dp.GetDrumPatternRaw(drumpattern,drumstyle));
 }
 
 function InitImportDialog()

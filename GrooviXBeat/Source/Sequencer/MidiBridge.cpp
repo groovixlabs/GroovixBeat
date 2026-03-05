@@ -3,6 +3,7 @@
 */
 
 #include "MidiBridge.h"
+#include <set>
 
 //==============================================================================
 MidiBridge::MidiBridge (juce::MidiMessageCollector& collector)
@@ -218,6 +219,33 @@ void MidiBridge::timerCallback()
 {
     double currentTime = getCurrentTime();
 
+    // Song Mode: advance to the next scene when the current scene ends.
+    // Primary path: audio thread (MidiTrackOutput::processBlock → renderTrackBlock) sets
+    // sceneAdvancePending when it detects the sample-accurate boundary crossing.
+    // Fallback path: for sample-only scenes the MidiTrackOutput node has no connections in
+    // the AudioProcessorGraph and is never processed, so the audio thread never fires.
+    // In that case we use a wall-clock comparison (~1ms accuracy) as the fallback.
+    if (inSongMode && playing)
+    {
+        if (clipScheduler.consumeSceneAdvancePending())
+        {
+            // Sample-accurate: audio thread detected the exact boundary crossing.
+            advanceSongScene();
+        }
+        else if (tempo > 0.0 && currentSongSceneDurationBeats > 0.0)
+        {
+            double elapsed = currentTime - songSceneStartTime;
+            double expectedSeconds = currentSongSceneDurationBeats * 60.0 / tempo;
+            if (elapsed >= expectedSeconds)
+            {
+                // Wall-clock fallback: consume any stale audio-thread signal so it
+                // cannot double-fire on the next tick, then advance.
+                clipScheduler.consumeSceneAdvancePending();
+                advanceSongScene();
+            }
+        }
+    }
+
     // NOTE: Clip scheduler is now driven by the audio thread via MidiTrackOutput::processBlock.
     // No need to call clipScheduler.processEvents() here.
 
@@ -401,6 +429,16 @@ void MidiBridge::queueStopSample(int trackIndex)
     }
 }
 
+void MidiBridge::cancelQueuedSample(int trackIndex)
+{
+    DBG("MidiBridge::cancelQueuedSample - track: " + juce::String(trackIndex));
+
+    if (samplePlayerManager != nullptr)
+    {
+        samplePlayerManager->cancelQueuedSample(trackIndex);
+    }
+}
+
 void MidiBridge::triggerSampleScene(int sceneIndex, const juce::var& clipsArray)
 {
     DBG("MidiBridge::triggerSampleScene - scene: " + juce::String(sceneIndex));
@@ -475,4 +513,151 @@ void MidiBridge::setLiveMode(bool enabled)
 {
     DBG("MidiBridge::setLiveMode - " + juce::String(enabled ? "ON" : "OFF"));
     clipScheduler.setLiveMode(enabled);
+}
+
+//==============================================================================
+// Song Mode
+
+void MidiBridge::setSongSceneDuration(double beats)
+{
+    currentSongSceneDurationBeats = beats;
+    songSceneStartTime = getCurrentTime();  // wall-clock fallback reference
+    double steps = beats * 4.0;  // 1 beat = 4 steps (1/16th notes)
+    clipScheduler.setSongSceneEndSteps(steps);
+    clipScheduler.setSongMode(true);
+    inSongMode = true;
+
+    DBG("MidiBridge::setSongSceneDuration - " + juce::String(beats) + " beats (" +
+        juce::String(steps) + " steps)");
+}
+
+void MidiBridge::preQueueSongScene(int sceneIndex,
+                                    const juce::var& midiClipsArray,
+                                    const juce::var& sampleFilesArray,
+                                    double durationBeats)
+{
+    songNextSceneIndex = sceneIndex;
+    songNextSceneDurationBeats = durationBeats;
+    nextSceneMidiClipsVar = midiClipsArray;
+
+    nextSceneSamples.clear();
+    if (sampleFilesArray.isArray())
+    {
+        for (int i = 0; i < sampleFilesArray.size(); ++i)
+        {
+            const auto& s = sampleFilesArray[i];
+            SongSampleClip clip;
+            clip.trackIndex     = s.getProperty("trackIndex", 0);
+            clip.filePath       = s.getProperty("filePath", "").toString();
+            clip.offset         = s.getProperty("offset", 0.0);
+            clip.loop           = s.getProperty("loop", true);
+            clip.loopLengthBeats = s.getProperty("loopLengthBeats", 4.0);
+            if (clip.filePath.isNotEmpty())
+                nextSceneSamples.push_back(clip);
+        }
+    }
+
+    songHasNextScene = true;
+
+    DBG("MidiBridge::preQueueSongScene - scene " + juce::String(sceneIndex) +
+        " duration " + juce::String(durationBeats) + " beats" +
+        " midiTracks " + juce::String(midiClipsArray.isArray() ? midiClipsArray.size() : 0) +
+        " sampleTracks " + juce::String((int)nextSceneSamples.size()));
+}
+
+void MidiBridge::stopSongMode()
+{
+    inSongMode = false;
+    songHasNextScene = false;
+    clipScheduler.setSongMode(false);
+    DBG("MidiBridge::stopSongMode");
+}
+
+void MidiBridge::setSongSceneChangedCallback(std::function<void(int)> callback)
+{
+    songSceneChangedCallback = callback;
+}
+
+void MidiBridge::advanceSongScene()
+{
+    if (!songHasNextScene)
+    {
+        // No next scene queued: end of song
+        DBG("MidiBridge::advanceSongScene - no next scene, song ended");
+        stop();
+        inSongMode = false;
+        if (songSceneChangedCallback)
+            songSceneChangedCallback(-1);  // -1 = song ended
+        return;
+    }
+
+    DBG("MidiBridge::advanceSongScene - advancing to scene " + juce::String(songNextSceneIndex));
+
+    // 1. Advance playStartSample so new scene renders from step 0
+    clipScheduler.adjustPlayStartForSceneTransition(currentSongSceneDurationBeats * 4.0);
+
+    // 2. Replace MIDI clips with next scene's data
+    clipScheduler.clearAllClips();
+
+    if (nextSceneMidiClipsVar.isArray())
+    {
+        for (int i = 0; i < nextSceneMidiClipsVar.size(); ++i)
+        {
+            const auto& clip = nextSceneMidiClipsVar[i];
+            int trackIndex    = clip.getProperty("trackIndex", 0);
+            juce::var notes   = clip.getProperty("notes", juce::var());
+            double loopLength = clip.getProperty("loopLength", 64.0);
+            int program       = clip.getProperty("program", 0);
+            bool isDrum       = clip.getProperty("isDrum", false);
+            bool loopClip     = clip.getProperty("loop", true);
+            clipScheduler.setClipFromVar(trackIndex, notes, loopLength, program, isDrum, loopClip);
+        }
+    }
+
+    // 3. Transition samples: start new scene's tracks seamlessly and stop any old
+    //    tracks that have no replacement — both at the same targetSample so the
+    //    cut is gapless.
+    if (samplePlayerManager != nullptr)
+    {
+        int64_t targetSample = clipScheduler.getLatestAudioPosition();
+
+        // Build the set of tracks that will receive a new sample
+        std::set<int> nextTrackIndices;
+        for (const auto& sample : nextSceneSamples)
+            nextTrackIndices.insert(sample.trackIndex);
+
+        // Stop tracks NOT in the next scene at the same boundary (no-op if not playing)
+        for (int t : samplePlayerManager->getTrackIndices())
+        {
+            if (nextTrackIndices.find(t) == nextTrackIndices.end())
+                samplePlayerManager->queueStopSample(t, targetSample);
+        }
+
+        // Start next scene's samples at that same boundary
+        for (auto& sample : nextSceneSamples)
+        {
+            samplePlayerManager->queueSampleFileSeamless(
+                sample.trackIndex, sample.filePath, sample.offset,
+                sample.loop, sample.loopLengthBeats, targetSample);
+        }
+    }
+
+    // 4. Set up song mode for the new scene
+    currentSongSceneDurationBeats = songNextSceneDurationBeats;
+    songSceneStartTime = getCurrentTime();  // reset wall-clock reference for new scene
+    int advancedToScene = songNextSceneIndex;
+    songHasNextScene = false;
+
+    if (songNextSceneDurationBeats > 0.0)
+    {
+        clipScheduler.setSongSceneEndSteps(songNextSceneDurationBeats * 4.0);
+        clipScheduler.setSongMode(true);
+        inSongMode = true;
+    }
+
+    // 5. Notify JS — it will update UI and pre-queue the scene after this one
+    if (songSceneChangedCallback)
+        songSceneChangedCallback(advancedToScene);
+
+    DBG("MidiBridge::advanceSongScene - now at scene " + juce::String(advancedToScene));
 }

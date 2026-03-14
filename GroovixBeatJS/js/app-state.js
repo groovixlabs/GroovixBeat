@@ -245,7 +245,9 @@ const AppState = {
                 isPercussion: false,           // Independent percussion flag (drum names + MIDI ch 10)
                 playbackMode: 'loop',          // 'oneshot' or 'loop' (for all track types)
                 instrument: null,              // { pluginId, nodeId, name, state }
-                fxChain: []                    // Array of { pluginId, nodeId, name, state, bypass }
+                fxChain: [],                   // Array of { pluginId, nodeId, name, state, bypass }
+                midiInputDevice: '',           // MIDI input device name ('' = none)
+                midiInputChannel: 0            // 0 = all channels, 1-16 = specific channel
             };
         }
         return this.trackSettings[trackIndex];
@@ -269,6 +271,12 @@ const AppState = {
         }
         if (settings.isPercussion === undefined) {
             settings.isPercussion = false;
+        }
+        if (settings.midiInputDevice === undefined) {
+            settings.midiInputDevice = '';
+        }
+        if (settings.midiInputChannel === undefined) {
+            settings.midiInputChannel = 0;
         }
         // Compute isDrumTrack for backwards compatibility
         settings.isDrumTrack = settings.isPercussion;
@@ -689,7 +697,9 @@ const AppState = {
             playbackMode: settings.playbackMode || 'loop',
             instrument: settings.instrument || null,
             samplerInstrument: settings.samplerInstrument || null,
-            fxChain: settings.fxChain || []
+            fxChain: settings.fxChain || [],
+            midiInputDevice: settings.midiInputDevice || '',
+            midiInputChannel: settings.midiInputChannel || 0
         }));
 
         // Get track scales from ClipEditor
@@ -883,7 +893,9 @@ const AppState = {
                         playbackMode: data.trackSettings[t].playbackMode || 'loop',
                         instrument: data.trackSettings[t].instrument || null,
                         samplerInstrument: data.trackSettings[t].samplerInstrument || null,
-                        fxChain: data.trackSettings[t].fxChain || []
+                        fxChain: data.trackSettings[t].fxChain || [],
+                        midiInputDevice: data.trackSettings[t].midiInputDevice || '',
+                        midiInputChannel: data.trackSettings[t].midiInputChannel || 0
                     };
                 } else {
                     this.initTrackSettings(t);

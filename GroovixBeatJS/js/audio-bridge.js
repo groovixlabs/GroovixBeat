@@ -303,6 +303,16 @@ const AudioBridge = {
     samplerLoadingTracks: new Set(),
     _pendingPlayCommand: null,
 
+    // MIDI input connect/record state
+    midiConnectedTracks: {},      // trackIndex -> true if MIDI input is connected
+    midiRecordingTrack: null,     // trackIndex being recorded, or null
+    _pendingRecordNotes: {},      // pitch -> { start: step, velocity } for active note-ons
+    _midiDeviceList: null,        // cached list of MIDI input device names from JUCE
+
+    // Record head - wall-clock-based position counter (independent of JUCE playback)
+    _recordStartTime: null,       // performance.now() when recording started
+    _recordHeadStep: 0,           // current record position in steps
+
     // Live mode state
     liveMode: false,
     livePlayingClips: {},
@@ -2271,6 +2281,69 @@ const AudioBridge = {
                 }
                 break;
 
+            case 'midiDeviceList': {
+                // JUCE sends the list of available MIDI input device names
+                this._midiDeviceList = message.devices || [];
+                // Update the pending select if the track settings modal is open
+                const pendingSel = this._pendingDeviceSelect;
+                const pendingVal = this._pendingDeviceValue;
+                this._pendingDeviceSelect = null;
+                this._pendingDeviceValue = null;
+                if (pendingSel) {
+                    // Repopulate directly (cache is now set, won't re-request)
+                    while (pendingSel.options.length > 1) pendingSel.remove(1);
+                    this._midiDeviceList.forEach(name => {
+                        const opt = document.createElement('option');
+                        opt.value = name;
+                        opt.textContent = name;
+                        pendingSel.appendChild(opt);
+                    });
+                    if (pendingVal) pendingSel.value = pendingVal;
+                }
+                break;
+            }
+
+            case 'midiNoteIn': {
+                // JUCE forwards an incoming MIDI note event from the connected input device
+                // Only process if recording is active for this track
+                if (this.midiRecordingTrack !== message.trackIndex) break;
+                const trackIndex = message.trackIndex;
+                const pitch = message.pitch;
+                const velocity = message.velocity || 0;
+                const isNoteOn = message.isNoteOn && velocity > 0;
+
+                if (typeof AppState === 'undefined') break;
+                const clip = AppState.getClip(AppState.currentScene, trackIndex);
+                if (!clip) break;
+
+                if (isNoteOn) {
+                    // Stamp note-on with current record head position (float, for accuracy)
+                    this._pendingRecordNotes[pitch] = {
+                        start: this._getRecordHeadStep(),
+                        velocity: velocity / 127
+                    };
+                } else {
+                    // Note-off: compute duration from record head and write to clip
+                    const info = this._pendingRecordNotes[pitch];
+                    if (info !== undefined) {
+                        const endStep = this._getRecordHeadStep();
+                        const startSnapped = Math.round(info.start);
+                        const duration = Math.max(1, Math.round(endStep - info.start));
+                        clip.notes.push({ pitch: pitch, start: startSnapped, duration: duration, velocity: info.velocity });
+                        delete this._pendingRecordNotes[pitch];
+
+                        if (typeof ClipEditor !== 'undefined' && ClipEditor.gridCtx &&
+                            AppState.currentTrack === trackIndex) {
+                            ClipEditor.renderPianoGrid();
+                        }
+                        if (typeof SongScreen !== 'undefined' && SongScreen.updateClipVisual) {
+                            SongScreen.updateClipVisual(AppState.currentScene, trackIndex);
+                        }
+                    }
+                }
+                break;
+            }
+
             case 'sceneChanged': {
                 // C++ advanced to the next scene (or song ended when sceneIndex == -1).
                 // JS updates UI and pre-queues the scene after this one.
@@ -2324,6 +2397,162 @@ const AudioBridge = {
             trackSettings: this._getAllTrackSettings(),
             mixerStates: this._getAllMixerStates()
         };
+    },
+
+    // ==========================================
+    // MIDI Input Connect / Record
+    // ==========================================
+
+    /**
+     * Enable or disable MIDI input routing from an external device to a track's instrument.
+     * Sends setMidiInput command to JUCE.
+     */
+    setMidiInputConnect(trackIndex, device, channel, enabled) {
+        this.midiConnectedTracks[trackIndex] = enabled;
+        if (this.externalHandler) {
+            this.send('setMidiInput', {
+                trackIndex: trackIndex,
+                device: device || '',
+                channel: parseInt(channel, 10) || 0,
+                enabled: enabled
+            });
+        }
+    },
+
+    /**
+     * Start MIDI note recording into the current clip for the given track.
+     * A wall-clock record head advances from step 0 at the current tempo.
+     * Recording auto-stops when the record head reaches the clip length.
+     */
+    startMidiRecord(trackIndex) {
+        this.midiRecordingTrack = trackIndex;
+        this._pendingRecordNotes = {};
+        this._recordStartTime = performance.now();
+        this._recordHeadStep = 0;
+
+        // Ensure connect is active so MIDI events flow
+        if (!this.midiConnectedTracks[trackIndex]) {
+            const trackSettings = typeof AppState !== 'undefined' ? AppState.getTrackSettings(trackIndex) : {};
+            this.setMidiInputConnect(trackIndex, trackSettings.midiInputDevice || '', trackSettings.midiInputChannel || 0, true);
+        }
+
+        // Kick off the record head animation loop
+        this._animateRecordHead();
+    },
+
+    /**
+     * Returns the current record head position in steps, derived from
+     * wall-clock elapsed time and the current tempo.
+     */
+    _getRecordHeadStep() {
+        if (this._recordStartTime === null) return 0;
+        const tempo = (typeof AppState !== 'undefined' && AppState.tempo) ? AppState.tempo : 120;
+        const elapsedMs = performance.now() - this._recordStartTime;
+        // steps = elapsed_seconds * (tempo_bpm * 4_steps_per_beat / 60)
+        return elapsedMs / 1000 * tempo * 4 / 60;
+    },
+
+    /**
+     * Animation loop that drives the record head forward and auto-stops
+     * when the clip length is reached.
+     */
+    _animateRecordHead() {
+        if (this.midiRecordingTrack === null || this._recordStartTime === null) return;
+
+        this._recordHeadStep = this._getRecordHeadStep();
+
+        // Drive the piano-roll playhead so the user can see progress
+        this.playheadStep = this._recordHeadStep;
+
+        // Redraw the grid to show the moving record head
+        if (typeof ClipEditor !== 'undefined' && ClipEditor.gridCtx) {
+            ClipEditor.renderPianoGrid();
+        }
+
+        // Auto-stop when record head reaches the clip length
+        if (typeof AppState !== 'undefined') {
+            const clip = AppState.getClip(AppState.currentScene, this.midiRecordingTrack);
+            const clipLength = clip ? (clip.length || 64) : 64;
+            if (this._recordHeadStep >= clipLength) {
+                this.stopMidiRecord();
+                // Update button states
+                if (typeof ClipEditor !== 'undefined') ClipEditor.updateModeSelector();
+                return;
+            }
+        }
+
+        requestAnimationFrame(() => this._animateRecordHead());
+    },
+
+    /**
+     * Stop MIDI recording. Any held notes are finalized at the current
+     * record head position, then the record head is reset.
+     */
+    stopMidiRecord() {
+        if (this.midiRecordingTrack === null) return;
+        const trackIndex = this.midiRecordingTrack;
+
+        // Snapshot final record head position before clearing state
+        const finalStep = this._getRecordHeadStep();
+
+        this.midiRecordingTrack = null;
+        this._recordStartTime = null;
+        this._recordHeadStep = 0;
+
+        // Finalize any notes still held at stop time
+        if (typeof AppState !== 'undefined') {
+            const clip = AppState.getClip(AppState.currentScene, trackIndex);
+            if (clip) {
+                Object.entries(this._pendingRecordNotes).forEach(([pitch, info]) => {
+                    const duration = Math.max(1, Math.round(finalStep - info.start));
+                    clip.notes.push({ pitch: parseInt(pitch, 10), start: info.start, duration: duration, velocity: info.velocity });
+                });
+            }
+        }
+        this._pendingRecordNotes = {};
+
+        // Reset playhead only if JUCE isn't playing (so we don't jump the real playhead)
+        if (!this.isPlaying) {
+            this.playheadStep = 0;
+        }
+
+        if (typeof ClipEditor !== 'undefined' && ClipEditor.gridCtx) {
+            ClipEditor.renderPianoGrid();
+        }
+        if (typeof SongScreen !== 'undefined' && SongScreen.updateClipVisual) {
+            SongScreen.updateClipVisual(AppState.currentScene, trackIndex);
+        }
+    },
+
+    /**
+     * Populate a <select> element with MIDI input device names.
+     * Always requests a fresh list from JUCE; if a cached list exists it is
+     * applied immediately and then overwritten when the response arrives.
+     */
+    populateMidiInputDevices(selectEl, currentValue) {
+        const populate = (devices) => {
+            // Preserve the "None" option at index 0
+            while (selectEl.options.length > 1) selectEl.remove(1);
+            devices.forEach(name => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                selectEl.appendChild(opt);
+            });
+            if (currentValue) selectEl.value = currentValue;
+        };
+
+        // Apply cached list immediately so the modal isn't blank while waiting
+        if (this._midiDeviceList && this._midiDeviceList.length > 0) {
+            populate(this._midiDeviceList);
+        }
+
+        // Always request a fresh list from JUCE
+        if (this.externalHandler) {
+            this._pendingDeviceSelect = selectEl;
+            this._pendingDeviceValue = currentValue;
+            this.send('getMidiInputDevices', {});
+        }
     },
 
     _getAllTrackSettings() {
@@ -2465,6 +2694,9 @@ const AudioBridge = {
             if (state) {
                 this.send('syncProjectState', state);
             }
+
+            // Pre-fetch MIDI input device list so it's ready when track settings opens
+            this.send('getMidiInputDevices', {});
 
             console.log('[AudioBridge] Connected to JUCE via native function');
             return true;

@@ -601,7 +601,16 @@ h1 {
 .icon-synth { -webkit-mask-image: url('icons/synth.svg'); mask-image: url('icons/synth.svg'); }
 .icon-import-wizard { -webkit-mask-image: url('icons/import-wizard.svg'); mask-image: url('icons/import-wizard.svg'); }
 .icon-effects { -webkit-mask-image: url('icons/effects.svg'); mask-image: url('icons/effects.svg'); }
+.icon-midi-connect { -webkit-mask-image: url('icons/midi-connect.svg'); mask-image: url('icons/midi-connect.svg'); }
+.icon-record { -webkit-mask-image: url('icons/record.svg'); mask-image: url('icons/record.svg'); }
 .icon-upload { -webkit-mask-image: url('icons/upload.svg'); mask-image: url('icons/upload.svg'); }
+
+.tool-btn#midiRecordBtn.active {
+    background: rgba(220, 50, 50, 0.15);
+    color: #e53535;
+    border-color: #e53535;
+    box-shadow: 0 0 6px rgba(229, 53, 53, 0.4);
+}
 .icon-restore { -webkit-mask-image: url('icons/restore.svg'); mask-image: url('icons/restore.svg'); }
 .icon-showvstui { -webkit-mask-image: url('icons/showvstui.svg'); mask-image: url('icons/showvstui.svg'); }
 .icon-hourglass { -webkit-mask-image: url('icons/hourglass.svg'); mask-image: url('icons/hourglass.svg'); }
@@ -2775,6 +2784,14 @@ h1 {
     opacity: 0.35;
     cursor: not-allowed;
     pointer-events: none;
+}
+
+.scene-props-btn-manage.active {
+    color: #d5a865;
+    border-color: #d5a865;
+    box-shadow: 0 0 6px rgba(213, 168, 101, 0.35),
+                inset 3px 3px 6px rgba(0, 0, 0, 0.5),
+                inset -1px -1px 3px rgba(255, 255, 255, 0.03);
 }
 
 .scene-props-actions {

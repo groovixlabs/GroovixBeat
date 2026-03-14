@@ -917,6 +917,27 @@ const SongScreen = {
         document.getElementById('trackPropsMoveRight').disabled = (trackIndex >= AppState.numTracks - 1);
         document.getElementById('trackPropsDelete').disabled = (AppState.numTracks <= 1);
 
+        // Show MIDI section only for MIDI-based tracks
+        const settings = AppState.getTrackSettings(trackIndex);
+        const isMidiTrack = settings.instrument !== 'sample';
+        const midiSection = document.getElementById('trackPropsMidiSection');
+        midiSection.style.display = isMidiTrack ? 'flex' : 'none';
+
+        if (isMidiTrack) {
+            const deviceSelect = document.getElementById('trackPropsMidiDevice');
+            const channelSelect = document.getElementById('trackPropsMidiChannel');
+            const connectBtn = document.getElementById('trackPropsMidiConnect');
+
+            // Populate device list and restore saved values
+            AudioBridge.populateMidiInputDevices(deviceSelect, settings.midiInputDevice || '');
+            channelSelect.value = String(settings.midiInputChannel || 0);
+
+            // Reflect current connection state
+            const isConnected = !!(AudioBridge.midiConnectedTracks && AudioBridge.midiConnectedTracks[trackIndex]);
+            connectBtn.textContent = isConnected ? 'Disconnect' : 'Connect';
+            connectBtn.classList.toggle('active', isConnected);
+        }
+
         document.getElementById('trackPropsOverlay').classList.add('active');
     },
 
@@ -1140,6 +1161,29 @@ const SongScreen = {
         document.getElementById('trackPropsClose').addEventListener('click', () => this.closeTrackProperties());
         document.getElementById('trackPropsCancel').addEventListener('click', () => this.closeTrackProperties());
         document.getElementById('trackPropsSave').addEventListener('click', () => this.saveTrackProperties());
+
+        document.getElementById('trackPropsMidiConnect').addEventListener('click', () => {
+            const t = this.currentPropsTrack;
+            if (t < 0) return;
+            const device = document.getElementById('trackPropsMidiDevice').value;
+            const channel = parseInt(document.getElementById('trackPropsMidiChannel').value) || 0;
+            const isConnected = !!(AudioBridge.midiConnectedTracks && AudioBridge.midiConnectedTracks[t]);
+            const connectBtn = document.getElementById('trackPropsMidiConnect');
+
+            if (isConnected) {
+                AudioBridge.setMidiInputConnect(t, device, channel, false);
+                connectBtn.textContent = 'Connect';
+                connectBtn.classList.remove('active');
+            } else {
+                if (!device) { alert('Please select a MIDI input device first.'); return; }
+                // Save device/channel to AppState before connecting
+                AppState.trackSettings[t].midiInputDevice = device;
+                AppState.trackSettings[t].midiInputChannel = channel;
+                AudioBridge.setMidiInputConnect(t, device, channel, true);
+                connectBtn.textContent = 'Disconnect';
+                connectBtn.classList.add('active');
+            }
+        });
 
         document.getElementById('trackPropsOverlay').addEventListener('click', (e) => {
             if (e.target === document.getElementById('trackPropsOverlay')) {

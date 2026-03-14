@@ -1263,6 +1263,14 @@ SequencerComponent::~SequencerComponent()
         samplePlayerNodes.clear();
     }
 
+    // Remove all MIDI input device callbacks
+    {
+        juce::ScopedLock lock(midiInputRouteLock);
+        for (const auto& [trackIndex, route] : midiInputRoutes)
+            graphDocument.getDeviceManager().removeMidiInputDeviceCallback(route.deviceIdentifier, this);
+        midiInputRoutes.clear();
+    }
+
     webBrowser = nullptr;
 
     DBG("SequencerComponent::~SequencerComponent - completed");
@@ -2779,6 +2787,53 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
                           command + "', " + juce::String(trackIndex) + ", " +
                           juce::String(success ? "true" : "false") + "); }";
         evaluateJavaScript(js);
+    }
+    else if (command == "getMidiInputDevices")
+    {
+        // Return the list of MIDI input devices that are enabled in JUCE Audio Settings
+        auto& dm = graphDocument.getDeviceManager();
+        auto allDevices = juce::MidiInput::getAvailableDevices();
+
+        juce::String devicesJson = "[";
+        bool first = true;
+        for (const auto& device : allDevices)
+        {
+            if (dm.isMidiInputDeviceEnabled(device.identifier))
+            {
+                if (!first) devicesJson += ", ";
+                juce::String escaped = device.name.replace("\\", "\\\\").replace("\"", "\\\"");
+                devicesJson += "\"" + escaped + "\"";
+                first = false;
+            }
+        }
+        devicesJson += "]";
+
+        juce::String jsonResponse = "{\"type\": \"midiDeviceList\", \"devices\": " + devicesJson + "}";
+        DBG("getMidiInputDevices: " + jsonResponse);
+
+        auto* browser = webBrowser.get();
+        if (browser != nullptr)
+        {
+            juce::MessageManager::callAsync([browser, jsonResponse]()
+            {
+                browser->emitEventIfBrowserIsVisible("juceBridgeEvents", jsonResponse);
+            });
+        }
+    }
+    else if (command == "setMidiInput")
+    {
+        // Enable or disable MIDI input routing from a device to a track's instrument
+        int trackIndex       = payload.getProperty("trackIndex", 0);
+        juce::String device  = payload.getProperty("device", "").toString();
+        int channel          = payload.getProperty("channel", 0);
+        bool enabled         = payload.getProperty("enabled", false);
+
+        DBG("setMidiInput: track=" + juce::String(trackIndex)
+            + " device=" + device
+            + " channel=" + juce::String(channel)
+            + " enabled=" + juce::String(enabled ? "true" : "false"));
+
+        setMidiInputRoute(trackIndex, device, channel, enabled);
     }
     else
     {
@@ -4427,6 +4482,104 @@ void SequencerComponent::updateSoloStates()
         if (mixerIt != trackMixerPlugins.end() && mixerIt->second != nullptr)
         {
             mixerIt->second->setOtherTrackSoloed(otherSoloed);
+        }
+    }
+}
+
+//==============================================================================
+// MIDI Input Routing
+//==============================================================================
+
+void SequencerComponent::setMidiInputRoute(int trackIndex, const juce::String& deviceName, int channel, bool enabled)
+{
+    auto& dm = graphDocument.getDeviceManager();
+
+    // Resolve device name to identifier
+    juce::String deviceId;
+    for (const auto& d : juce::MidiInput::getAvailableDevices())
+    {
+        if (d.name == deviceName)
+        {
+            deviceId = d.identifier;
+            break;
+        }
+    }
+
+    juce::ScopedLock lock(midiInputRouteLock);
+
+    auto it = midiInputRoutes.find(trackIndex);
+    if (it != midiInputRoutes.end())
+    {
+        // Check if any other track still needs the old device
+        const juce::String& oldId = it->second.deviceIdentifier;
+        bool oldDeviceStillNeeded = false;
+        for (const auto& [t, route] : midiInputRoutes)
+            if (t != trackIndex && route.deviceIdentifier == oldId)
+                oldDeviceStillNeeded = true;
+
+        if (!oldDeviceStillNeeded && oldId.isNotEmpty())
+            dm.removeMidiInputDeviceCallback(oldId, this);
+
+        midiInputRoutes.erase(it);
+    }
+
+    if (enabled && deviceId.isNotEmpty())
+    {
+        midiInputRoutes[trackIndex] = { deviceId, channel };
+
+        // Register our callback for this device (safe to call even if already registered)
+        dm.addMidiInputDeviceCallback(deviceId, this);
+
+        DBG("setMidiInputRoute: track=" + juce::String(trackIndex)
+            + " device=" + deviceName + " [" + deviceId + "]"
+            + " channel=" + juce::String(channel));
+    }
+    else if (enabled)
+    {
+        DBG("setMidiInputRoute: device not found: " + deviceName);
+    }
+}
+
+void SequencerComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
+{
+    // Called on the MIDI thread - keep work minimal
+    juce::ScopedLock lock(midiInputRouteLock);
+
+    for (const auto& [trackIndex, route] : midiInputRoutes)
+    {
+        if (source->getIdentifier() != route.deviceIdentifier)
+            continue;
+
+        // Apply channel filter (0 = all channels)
+        if (route.channel != 0 && message.getChannel() != route.channel)
+            continue;
+
+        // Route ALL MIDI messages directly to the track's VST instrument.
+        // This covers notes, CC, pitch bend, aftertouch, program change, etc.
+        midiTrackOutputManager.sendMidiToTrack(trackIndex, message);
+
+        // Forward note-on / note-off to JS for recording and visualization only
+        if (message.isNoteOn() || message.isNoteOff())
+        {
+            const int pitch     = message.getNoteNumber();
+            const int velocity  = message.getVelocity();
+            const bool isNoteOn = message.isNoteOn();
+            const int ti        = trackIndex;
+            auto* browser       = webBrowser.get();
+
+            if (browser != nullptr)
+            {
+                juce::MessageManager::callAsync([browser, ti, pitch, velocity, isNoteOn]()
+                {
+                    juce::String jsonEvent =
+                        "{\"type\": \"midiNoteIn\","
+                        " \"trackIndex\": " + juce::String(ti) + ","
+                        " \"pitch\": "      + juce::String(pitch) + ","
+                        " \"velocity\": "   + juce::String(velocity) + ","
+                        " \"isNoteOn\": "   + juce::String(isNoteOn ? "true" : "false") + "}";
+                    browser->emitEventIfBrowserIsVisible("juceBridgeEvents", jsonEvent);
+                });
+            }
         }
     }
 }

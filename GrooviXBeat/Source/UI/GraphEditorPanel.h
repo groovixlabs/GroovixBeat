@@ -161,6 +161,7 @@ public:
     MidiKeyboardState& getMidiKeyboardState() { return keyState; }
     MidiMessageCollector& getMidiMessageCollector() { return graphPlayer.getMidiMessageCollector(); }
     KnownPluginList& getPluginList() { return pluginList; }
+    AudioDeviceManager& getDeviceManager() { return deviceManager; }
 
     BurgerMenuComponent burgerMenu;
 

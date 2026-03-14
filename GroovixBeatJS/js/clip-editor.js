@@ -431,6 +431,23 @@ const ClipEditor = {
                 InstrumentSelector.trackInstruments[AppState.currentTrack].id;
             vstUiBtn.style.display = (isMelody && hasInstrument) ? '' : 'none';
         }
+
+        // Show/hide Connect and Record buttons: only for MIDI-based tracks (not sample)
+        const midiConnectBtn = document.getElementById('midiConnectBtn');
+        const midiRecordBtn = document.getElementById('midiRecordBtn');
+        if (midiConnectBtn && midiRecordBtn) {
+            const isMidiTrack = !isSampleMode;
+            midiConnectBtn.style.display = isMidiTrack ? '' : 'none';
+            midiRecordBtn.style.display = isMidiTrack ? '' : 'none';
+
+            // Update active state to reflect per-track connect/record state
+            if (typeof AudioBridge !== 'undefined') {
+                const isConnected = !!AudioBridge.midiConnectedTracks[AppState.currentTrack];
+                const isRecording = AudioBridge.midiRecordingTrack === AppState.currentTrack;
+                midiConnectBtn.classList.toggle('active', isConnected);
+                midiRecordBtn.classList.toggle('active', isRecording);
+            }
+        }
     },
 
     // Handle track type change from dropdown
@@ -1250,6 +1267,41 @@ const ClipEditor = {
             ctx.moveTo(playheadX, 0);
             ctx.lineTo(playheadX, height);
             ctx.stroke();
+            ctx.restore();
+        }
+
+        // Draw record head if recording is active for this track
+        if (typeof AudioBridge !== 'undefined' &&
+            AudioBridge.midiRecordingTrack === AppState.currentTrack &&
+            AudioBridge._recordStartTime !== null) {
+
+            const recordStep = AudioBridge._getRecordHeadStep();
+            const clipLength = AppState.currentLength || 64;
+            const rx = Math.min(recordStep, clipLength) * stepWidth;
+
+            ctx.save();
+
+            // Red glow line
+            ctx.strokeStyle = '#ff3333';
+            ctx.lineWidth = 2;
+            ctx.shadowColor = '#ff3333';
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.moveTo(rx, 0);
+            ctx.lineTo(rx, height);
+            ctx.stroke();
+
+            // Downward-pointing triangle flag at the top
+            const flagSize = 8;
+            ctx.fillStyle = '#ff3333';
+            ctx.shadowBlur = 0;
+            ctx.beginPath();
+            ctx.moveTo(rx - flagSize, 0);
+            ctx.lineTo(rx + flagSize, 0);
+            ctx.lineTo(rx, flagSize * 1.4);
+            ctx.closePath();
+            ctx.fill();
+
             ctx.restore();
         }
     },
@@ -2479,6 +2531,30 @@ const ClipEditor = {
             this.showTrackSettings(AppState.currentTrack);
         });
 
+        // MIDI Connect button
+        document.getElementById('midiConnectBtn').addEventListener('click', () => {
+            if (typeof AudioBridge !== 'undefined') {
+                const trackIndex = AppState.currentTrack;
+                const isConnected = !!AudioBridge.midiConnectedTracks[trackIndex];
+                const trackSettings = AppState.getTrackSettings(trackIndex);
+                AudioBridge.setMidiInputConnect(trackIndex, trackSettings.midiInputDevice, trackSettings.midiInputChannel, !isConnected);
+                this.updateModeSelector();
+            }
+        });
+
+        // MIDI Record button
+        document.getElementById('midiRecordBtn').addEventListener('click', () => {
+            if (typeof AudioBridge !== 'undefined') {
+                const trackIndex = AppState.currentTrack;
+                if (AudioBridge.midiRecordingTrack === trackIndex) {
+                    AudioBridge.stopMidiRecord();
+                } else {
+                    AudioBridge.startMidiRecord(trackIndex);
+                }
+                this.updateModeSelector();
+            }
+        });
+
         // VST UI button
         document.getElementById('vstUiBtn').addEventListener('click', () => {
             if (typeof InstrumentSelector !== 'undefined') {
@@ -2705,6 +2781,9 @@ const ClipEditor = {
         const samplerInstrumentSelect = document.getElementById('samplerInstrumentSelect');
         const percussionCheckbox = document.getElementById('trackPercussionCheckbox');
         const percussionRow = document.getElementById('trackPercussionRow');
+        const midiInputRow = document.getElementById('midiInputRow');
+        const midiInputDeviceSelect = document.getElementById('midiInputDeviceSelect');
+        const midiInputChannelSelect = document.getElementById('midiInputChannelSelect');
 
         if (!modal) return;
 
@@ -2759,6 +2838,19 @@ const ClipEditor = {
         samplerInstrumentRow.style.display = isSamplerInstrument ? 'flex' : 'none';
         const midiChannelRow = document.getElementById('midiChannelRow');
         if (midiChannelRow) midiChannelRow.style.display = isMelody ? 'flex' : 'none';
+
+        // Show/hide Midi From row (for all MIDI-based tracks: melody, sampled_instrument, drum_kit)
+        const showMidiInput = !isSample;
+        if (midiInputRow) {
+            midiInputRow.style.display = showMidiInput ? 'flex' : 'none';
+            if (showMidiInput) {
+                // Populate device list from JUCE
+                if (typeof AudioBridge !== 'undefined') {
+                    AudioBridge.populateMidiInputDevices(midiInputDeviceSelect, trackSettings.midiInputDevice);
+                }
+                midiInputChannelSelect.value = trackSettings.midiInputChannel || 0;
+            }
+        }
 
         // Show/hide VST instrument row (only for melody tracks)
         const vstInstrumentRow = document.getElementById('vstInstrumentRow');
@@ -2865,6 +2957,13 @@ const ClipEditor = {
                     const trackSettings = AppState.getTrackSettings(this.trackSettingsTrackIndex);
                     this.populateSamplerInstrumentSelect(samplerInstrumentSelect, trackSettings.samplerInstrument);
                 }
+
+                // Show/hide Midi From row
+                const midiInputRow = document.getElementById('midiInputRow');
+                if (midiInputRow) {
+                    const showMidiInput = trackType !== 'sample';
+                    midiInputRow.style.display = showMidiInput ? 'flex' : 'none';
+                }
             });
 
             // Toggle scale settings visibility when percussion checkbox changes
@@ -2942,13 +3041,18 @@ const ClipEditor = {
         const trackMode = trackTypeSelect.value;
         const samplerInstrumentSelect = document.getElementById('samplerInstrumentSelect');
 
+        const midiInputDeviceSelect = document.getElementById('midiInputDeviceSelect');
+        const midiInputChannelSelect = document.getElementById('midiInputChannelSelect');
+
         // Build track settings update
         const settingsUpdate = {
             trackType: trackMode,
             // drum_kit doesn't have a percussion checkbox (it's always treated as percussion)
             isPercussion: (trackMode !== 'sample' && trackMode !== 'drum_kit') ? percussionCheckbox.checked : false,
             midiChannel: parseInt(channelSelect.value, 10),
-            midiProgram: parseInt(instrumentSelect.value, 10)
+            midiProgram: parseInt(instrumentSelect.value, 10),
+            midiInputDevice: (trackMode !== 'sample' && midiInputDeviceSelect) ? midiInputDeviceSelect.value : '',
+            midiInputChannel: (trackMode !== 'sample' && midiInputChannelSelect) ? parseInt(midiInputChannelSelect.value, 10) : 0
         };
 
         // If sampled_instrument, store the selected instrument name and send to JUCE.
@@ -2978,6 +3082,16 @@ const ClipEditor = {
 
         // Update track settings (track-level)
         AppState.setTrackSettings(this.trackSettingsTrackIndex, settingsUpdate);
+
+        // If Connect is active for this track, update JUCE with the new device/channel
+        if (typeof AudioBridge !== 'undefined' && AudioBridge.midiConnectedTracks[this.trackSettingsTrackIndex]) {
+            AudioBridge.setMidiInputConnect(
+                this.trackSettingsTrackIndex,
+                settingsUpdate.midiInputDevice,
+                settingsUpdate.midiInputChannel,
+                true
+            );
+        }
 
         // Get current clip and update clip-level properties
         const clip = AppState.getClip(AppState.currentScene, this.trackSettingsTrackIndex);

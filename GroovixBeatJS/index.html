@@ -273,6 +273,34 @@
                     <label class="scene-props-label">Name</label>
                     <input type="text" class="scene-props-input" id="trackPropsName" placeholder="Track name">
                 </div>
+                <div class="scene-props-field" id="trackPropsMidiSection" style="display:none; flex-direction:column; gap:6px;">
+                    <label class="scene-props-label">MIDI Input</label>
+                    <div style="display:flex; gap:6px; align-items:center;">
+                        <select id="trackPropsMidiDevice" class="track-settings-select" style="flex:1;">
+                            <option value="">None</option>
+                        </select>
+                        <select id="trackPropsMidiChannel" class="track-settings-select" style="width:90px;">
+                            <option value="0">All Ch.</option>
+                            <option value="1">Ch. 1</option>
+                            <option value="2">Ch. 2</option>
+                            <option value="3">Ch. 3</option>
+                            <option value="4">Ch. 4</option>
+                            <option value="5">Ch. 5</option>
+                            <option value="6">Ch. 6</option>
+                            <option value="7">Ch. 7</option>
+                            <option value="8">Ch. 8</option>
+                            <option value="9">Ch. 9</option>
+                            <option value="10">Ch. 10</option>
+                            <option value="11">Ch. 11</option>
+                            <option value="12">Ch. 12</option>
+                            <option value="13">Ch. 13</option>
+                            <option value="14">Ch. 14</option>
+                            <option value="15">Ch. 15</option>
+                            <option value="16">Ch. 16</option>
+                        </select>
+                        <button class="scene-props-btn-manage" id="trackPropsMidiConnect" title="Connect MIDI Input">Connect</button>
+                    </div>
+                </div>
             </div>
             <div class="scene-props-manage">
                 <button class="scene-props-btn-manage" id="trackPropsClone" title="Clone Track">Clone</button>
@@ -335,6 +363,12 @@
 
                 <button class="tool-btn" id="trackFxBtn" title="Track Effects (F)">
                     <span class="icon icon-effects"></span>
+                </button>
+                <button class="tool-btn" id="midiConnectBtn" title="Connect MIDI Input" style="display: none;">
+                    <span class="icon icon-midi-connect"></span>
+                </button>
+                <button class="tool-btn" id="midiRecordBtn" title="Record MIDI Input" style="display: none;">
+                    <span class="icon icon-record"></span>
                 </button>
                 <div class="toolbar-separator"></div>
                 <div class="toolbar-group">
@@ -633,6 +667,31 @@
                     </select>
                     <select id="trackMidiInstrument" class="track-settings-select">
                         <!-- Options populated dynamically from AppState.GM_INSTRUMENTS -->
+                    </select>
+                </div>
+                <div class="track-settings-row" id="midiInputRow" style="display: none;">
+                    <label>Midi From:</label>
+                    <select id="midiInputDeviceSelect" class="track-settings-select">
+                        <option value="">None</option>
+                    </select>
+                    <select id="midiInputChannelSelect" class="track-settings-select" style="width: 90px;">
+                        <option value="0">All Ch.</option>
+                        <option value="1">Ch. 1</option>
+                        <option value="2">Ch. 2</option>
+                        <option value="3">Ch. 3</option>
+                        <option value="4">Ch. 4</option>
+                        <option value="5">Ch. 5</option>
+                        <option value="6">Ch. 6</option>
+                        <option value="7">Ch. 7</option>
+                        <option value="8">Ch. 8</option>
+                        <option value="9">Ch. 9</option>
+                        <option value="10">Ch. 10</option>
+                        <option value="11">Ch. 11</option>
+                        <option value="12">Ch. 12</option>
+                        <option value="13">Ch. 13</option>
+                        <option value="14">Ch. 14</option>
+                        <option value="15">Ch. 15</option>
+                        <option value="16">Ch. 16</option>
                     </select>
                 </div>
             </div>

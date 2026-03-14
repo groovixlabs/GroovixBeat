@@ -49,7 +49,8 @@ class GraphDocumentComponent;
 //==============================================================================
 // SequencerComponent for embedding in tabs
 class SequencerComponent final : public Component,
-                                 private Timer
+                                 private Timer,
+                                 private juce::MidiInputCallback
 {
 public:
     SequencerComponent (GraphDocumentComponent& graphDoc, PluginGraph& graph);
@@ -211,6 +212,20 @@ private:
 
     // Update solo state across all tracks (when any track's solo changes)
     void updateSoloStates();
+
+    // MIDI input routing: connect/disconnect an external device to a track
+    void setMidiInputRoute(int trackIndex, const juce::String& deviceName, int channel, bool enabled);
+
+    // MidiInputCallback: receives MIDI from an external device on the MIDI thread
+    void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
+
+    struct MidiInputRoute
+    {
+        juce::String deviceIdentifier;
+        int channel = 0;   // 0 = all channels, 1-16 = specific
+    };
+    std::map<int, MidiInputRoute> midiInputRoutes;  // trackIndex -> route
+    juce::CriticalSection midiInputRouteLock;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SequencerComponent)
 };

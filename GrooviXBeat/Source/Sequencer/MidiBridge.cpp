@@ -161,6 +161,13 @@ void MidiBridge::play()
 
 void MidiBridge::stop()
 {
+    if (clipScheduler.isInLiveMode())
+    {
+        DBG("*** MidiBridge::stop() called DURING LIVE MODE - this will kill all sample players! ***");
+        DBG("    Call stack hint: check who sent stop/stopClip/stopScene/stopSong/transportStop/stopAll");
+        jassertfalse;  // Break in debugger so we can inspect the call stack
+    }
+
     playing = false;
     pausedPosition = 0.0;
 
@@ -282,6 +289,24 @@ void MidiBridge::timerCallback()
         {
             double positionBeats = getPlayheadPositionBeats();
             samplePlayerManager->processTransportSync(positionBeats, tempo, quantizeSteps, playing);
+        }
+
+        // Notify JS of live-mode sample clip start/stop events at quantize boundaries.
+        if (samplePlayerManager && liveClipEventCallback)
+        {
+            samplePlayerManager->consumeLiveEvents(liveClipEventCallback);
+        }
+
+        // Notify JS of live-mode mute/unmute events.
+        if (samplePlayerManager && liveClipMuteCallback)
+        {
+            samplePlayerManager->consumeMuteEvents(liveClipMuteCallback);
+        }
+
+        // Notify JS of live-mode MIDI clip start/stop events at quantize boundaries.
+        if (liveMidiClipEventCallback)
+        {
+            clipScheduler.consumeNotifications(liveMidiClipEventCallback);
         }
     }
 }
@@ -417,14 +442,18 @@ void MidiBridge::queueSampleFileSeamless(int trackIndex, const juce::String& fil
 
 void MidiBridge::queueStopSample(int trackIndex)
 {
-    DBG("MidiBridge::queueStopSample - track: " + juce::String(trackIndex));
+    int64_t boundary = getNextQuantizeBoundarySample();
+    int64_t latest   = getLatestAudioPosition();
+    int64_t targetSample = (boundary >= 0) ? boundary : latest;
+
+    DBG("[MidiBridge] queueStopSample T" + juce::String(trackIndex)
+        + " nextBoundary=" + juce::String(boundary)
+        + " latestAudioPos=" + juce::String(latest)
+        + " chosenTarget=" + juce::String(targetSample)
+        + " transportPlaying=" + juce::String(playing ? 1 : 0));
 
     if (samplePlayerManager != nullptr)
     {
-        int64_t targetSample = getNextQuantizeBoundarySample();
-        if (targetSample < 0)
-            targetSample = getLatestAudioPosition();
-
         samplePlayerManager->queueStopSample(trackIndex, targetSample);
     }
 }
@@ -437,6 +466,34 @@ void MidiBridge::cancelQueuedSample(int trackIndex)
     {
         samplePlayerManager->cancelQueuedSample(trackIndex);
     }
+}
+
+void MidiBridge::queueMuteSample(int trackIndex)
+{
+    int64_t boundary = getNextQuantizeBoundarySample();
+    int64_t latest   = getLatestAudioPosition();
+    int64_t targetSample = (boundary >= 0) ? boundary : latest;
+
+    DBG("[MidiBridge] queueMuteSample T" + juce::String(trackIndex)
+        + " nextBoundary=" + juce::String(boundary)
+        + " chosenTarget=" + juce::String(targetSample));
+
+    if (samplePlayerManager != nullptr)
+        samplePlayerManager->queueMuteSample(trackIndex, targetSample);
+}
+
+void MidiBridge::queueUnmuteSample(int trackIndex)
+{
+    int64_t boundary = getNextQuantizeBoundarySample();
+    int64_t latest   = getLatestAudioPosition();
+    int64_t targetSample = (boundary >= 0) ? boundary : latest;
+
+    DBG("[MidiBridge] queueUnmuteSample T" + juce::String(trackIndex)
+        + " nextBoundary=" + juce::String(boundary)
+        + " chosenTarget=" + juce::String(targetSample));
+
+    if (samplePlayerManager != nullptr)
+        samplePlayerManager->queueUnmuteSample(trackIndex, targetSample);
 }
 
 void MidiBridge::triggerSampleScene(int sceneIndex, const juce::var& clipsArray)

@@ -557,6 +557,9 @@ const SongScreen = {
         const isPlaying = typeof AudioBridge !== 'undefined' && AudioBridge.isLiveClipPlaying?.(row, col);
         const isQueued = typeof AudioBridge !== 'undefined' && AudioBridge.isLiveClipQueued?.(row, col);
         const isStopping = typeof AudioBridge !== 'undefined' && AudioBridge.isLiveClipStopping?.(row, col);
+        const isLiveMuted = typeof AudioBridge !== 'undefined' && AudioBridge.isLiveClipMuted?.(row, col);
+        const isLiveMuting = typeof AudioBridge !== 'undefined' && AudioBridge.isLiveClipMuting?.(row, col);
+        const isLiveUnmuting = typeof AudioBridge !== 'undefined' && AudioBridge.isLiveClipUnmuting?.(row, col);
         const isScenePlaying = typeof AudioBridge !== 'undefined' && AudioBridge.playingSceneIndex === row;
         const isMuted = clip?.mute;
 
@@ -578,7 +581,13 @@ const SongScreen = {
         ctx.fill();
 
         // Border/glow effects based on state
-        if (isPlaying) {
+        if (isLiveMuted) {
+            // Muted: dimmed amber border (transport still running, audio silenced)
+            ctx.strokeStyle = '#886600';
+            ctx.lineWidth = 2;
+            this.roundRect(ctx, x + 1, y + 1, this.CELL_WIDTH - 2, this.CELL_HEIGHT - 2, 4);
+            ctx.stroke();
+        } else if (isPlaying) {
             ctx.strokeStyle = '#00ff00';
             ctx.lineWidth = 2;
             ctx.shadowColor = '#00ff00';
@@ -586,6 +595,18 @@ const SongScreen = {
             this.roundRect(ctx, x + 1, y + 1, this.CELL_WIDTH - 2, this.CELL_HEIGHT - 2, 4);
             ctx.stroke();
             ctx.shadowBlur = 0;
+        } else if (isLiveMuting) {
+            // Queued to mute: orange pulsing border
+            ctx.strokeStyle = '#ff8800';
+            ctx.lineWidth = 2;
+            this.roundRect(ctx, x + 1, y + 1, this.CELL_WIDTH - 2, this.CELL_HEIGHT - 2, 4);
+            ctx.stroke();
+        } else if (isLiveUnmuting) {
+            // Queued to unmute: cyan border
+            ctx.strokeStyle = '#00ccff';
+            ctx.lineWidth = 2;
+            this.roundRect(ctx, x + 1, y + 1, this.CELL_WIDTH - 2, this.CELL_HEIGHT - 2, 4);
+            ctx.stroke();
         } else if (isQueued) {
             ctx.strokeStyle = '#ffaa00';
             ctx.lineWidth = 2;
@@ -1300,10 +1321,8 @@ const SongScreen = {
         const liveBtn = document.getElementById('livePerformanceBtn');
         if (liveBtn) {
             liveBtn.classList.toggle('active', enabled);
-            // Clear loading/ready states when disabling
-            if (!enabled) {
-                liveBtn.classList.remove('loading', 'ready');
-            }
+            // Always clear transient loading/ready states
+            liveBtn.classList.remove('loading', 'ready');
             const icon = liveBtn.querySelector('.icon');
             if (icon) {
                 if (enabled) {
@@ -1360,9 +1379,15 @@ const SongScreen = {
         }
     },
 
-    // Called when sample preloading is complete
+    // Called by JUCE when sample preloading is complete.
+    // Shows the green "ready" flash briefly, then fully activates live mode.
     onSamplesPreloaded: function() {
         this.setLiveModeLoadingState('ready');
+        setTimeout(() => {
+            if (typeof AudioBridge !== 'undefined') {
+                AudioBridge.onLiveModePreloadComplete();
+            }
+        }, 600);
     },
 
     // Update live clip visual states

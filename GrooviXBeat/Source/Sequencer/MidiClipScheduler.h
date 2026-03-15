@@ -87,6 +87,9 @@ public:
     void updateClipNotes(int trackIndex, const std::vector<MidiNote>& notes);
     void updateClipNotesFromVar(int trackIndex, const juce::var& notesArray);
 
+    /** Update only the loop length of an existing clip (steps = 1/16th notes). */
+    void setClipLoopLength(int trackIndex, double loopLengthSteps);
+
     void clearClip(int trackIndex);
     void clearAllClips();
     bool hasClip(int trackIndex) const;
@@ -124,6 +127,7 @@ public:
 
     /** Enable/disable live mode. In live mode, global transport does not trigger MIDI rendering. */
     void setLiveMode(bool enabled);
+    bool isInLiveMode() const { return inLiveMode; }
 
     //==============================================================================
     // Audio thread API
@@ -133,6 +137,14 @@ public:
      * Does NOT reset any counters - maintains timing continuity across graph rebuilds.
      */
     void prepareToPlay(double newSampleRate);
+
+    /**
+     * Consume pending start/stop notifications set by the audio thread when
+     * live-mode clips fire at quantize boundaries.  Call from the message thread
+     * (e.g. MidiBridge::timerCallback).
+     * callback(trackIndex, isStart) — isStart=true → clip started, false → stopped.
+     */
+    void consumeNotifications(std::function<void(int, bool)> callback);
 
     /**
      * Render MIDI events for a single track into the output buffer.
@@ -226,6 +238,11 @@ private:
         bool oneshotFinished = false;    // One-shot clip reached end
         bool pendingLivePlay = false;    // Queued to start at next quantize boundary
         bool pendingLiveStop = false;    // Queued to stop at next quantize boundary
+
+        // Notifications set by audio thread, consumed by message thread via consumeNotifications().
+        // Mirrors the sample-clip pendingStartNotification / pendingStopNotification pattern.
+        std::atomic<bool> pendingStartNotification { false };
+        std::atomic<bool> pendingStopNotification  { false };
 
         void clearActiveNotes() { activeNotes.reset(); }
     };

@@ -93,6 +93,14 @@ public:
     /** Cancel queued action for a track */
     void cancelQueuedSample(int trackIndex);
 
+    /**
+     * Queue a sample-accurate mute at the given boundary.
+     * The transport keeps running — loop wraps fire normally — but the output
+     * is silenced.  Unmuting resumes audio from the correct loop position.
+     */
+    void queueMuteSample(int trackIndex, int64_t targetSample);
+    void queueUnmuteSample(int trackIndex, int64_t targetSample);
+
     /** Set loop length for a track in beats */
     void setTrackLoopLengthBeats(int trackIndex, double beats);
 
@@ -186,11 +194,28 @@ public:
     /** Check if a sample is in the cache */
     bool isSampleCached(const juce::String& filePath) const;
 
+    /** Poll for live-mode clip start/stop events. Called from the message thread (e.g. timer).
+     *  Calls callback(trackIndex, isStart) for each pending event. */
+    void consumeLiveEvents(const std::function<void(int, bool)>& callback);
+
+    /** Poll for live-mode mute/unmute events.
+     *  Calls callback(trackIndex, isMuted) for each pending mute transition. */
+    void consumeMuteEvents(const std::function<void(int, bool)>& callback);
+
 private:
     std::map<int, SamplePlayerPlugin*> trackPlayers;
     mutable juce::CriticalSection lock;
 
     int currentQuantizeSteps = 16;  // Default: 1 bar
+    double currentBpm = 120.0;
+
+    // Resize (truncate or zero-pad) a buffer to exactly match a loop length.
+    // loopLengthBeats * (60/bpm) * sampleRate gives the target sample count.
+    // Returns a new buffer; if loopLengthBeats <= 0 or bpm <= 0, returns a copy unchanged.
+    static juce::AudioBuffer<float> fitBufferToLoopLength (const juce::AudioBuffer<float>& src,
+                                                            double srcSampleRate,
+                                                            double loopLengthBeats,
+                                                            double bpm);
 
     // Sample cache for Live Mode - stores audio buffers keyed by file path
     struct CachedSample

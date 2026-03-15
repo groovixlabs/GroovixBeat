@@ -128,6 +128,23 @@ public:
      */
     void setTargetStopSample(int64_t samplePos);
 
+    /** Consume pending live-mode start/stop notifications (call from message thread). */
+    bool consumeStartNotification() { return pendingStartNotification.exchange(false, std::memory_order_relaxed); }
+    bool consumeStopNotification()  { return pendingStopNotification.exchange(false, std::memory_order_relaxed); }
+
+    /**
+     * Queue a sample-accurate mute or unmute at the given absolute sample position.
+     * In muted state the transport continues running (loop wraps still fire) but the
+     * output buffer is silenced — so unmuting resumes audio seamlessly from the correct
+     * loop position without any seeking or file reloading.
+     */
+    void setTargetMuteSample(int64_t samplePos);
+    void setTargetUnmuteSample(int64_t samplePos);
+
+    bool consumeMuteNotification()   { return pendingMuteNotification.exchange(false, std::memory_order_relaxed); }
+    bool consumeUnmuteNotification() { return pendingUnmuteNotification.exchange(false, std::memory_order_relaxed); }
+    bool isMuted() const { return muted; }
+
     //==============================================================================
     // Sample Editing API
 
@@ -205,12 +222,20 @@ private:
     // targetStartSample / targetStopSample: absolute sample positions at which to
     //   fire a start or stop.  Written from the message thread (atomic), read and
     //   cleared on the audio thread inside processBlock().  -1 = not armed.
+    // targetMuteSample / targetUnmuteSample: same mechanism for live-mode mute toggle.
     int64_t cumulativeSamplePosition = 0;
-    std::atomic<int64_t> targetStartSample { -1 };
-    std::atomic<int64_t> targetStopSample  { -1 };
+    std::atomic<int64_t> targetStartSample  { -1 };
+    std::atomic<int64_t> targetStopSample   { -1 };
+    std::atomic<int64_t> targetMuteSample   { -1 };
+    std::atomic<int64_t> targetUnmuteSample { -1 };
+    std::atomic<bool> pendingStartNotification  { false };
+    std::atomic<bool> pendingStopNotification   { false };
+    std::atomic<bool> pendingMuteNotification   { false };
+    std::atomic<bool> pendingUnmuteNotification { false };
 
     // Playback state
     bool playing = false;
+    bool muted   = false;
     bool loopEnabled = true;
     double startOffset = 0.0;
 

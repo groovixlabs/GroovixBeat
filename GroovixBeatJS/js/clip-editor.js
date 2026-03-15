@@ -2492,6 +2492,15 @@ const ClipEditor = {
         this.initializeEditor();
         this.renderTrackButtons();
 
+        // Notify JUCE backend of the new loop length so sample players and the MIDI
+        // clip scheduler both update immediately without needing a full clip resend.
+        if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
+            AudioBridge.send('setClipLoopLength', {
+                trackIndex: AppState.currentTrack,
+                loopLengthSteps: length
+            });
+        }
+
         // Check if we're in sample mode
         const isSampleMode = this.getTrackMode(AppState.currentTrack) === 'sample';
 
@@ -3054,6 +3063,16 @@ const ClipEditor = {
             midiInputDevice: (trackMode !== 'sample' && midiInputDeviceSelect) ? midiInputDeviceSelect.value : '',
             midiInputChannel: (trackMode !== 'sample' && midiInputChannelSelect) ? parseInt(midiInputChannelSelect.value, 10) : 0
         };
+
+        // If switching to sample type, tell JUCE to remove any VST/sampler/drum node
+        // and restore the SamplePlayerPlugin → Mixer → Master connections.
+        if (trackMode === 'sample') {
+            if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
+                AudioBridge.send('setupSamplePlayerTrack', {
+                    trackIndex: this.trackSettingsTrackIndex
+                });
+            }
+        }
 
         // If sampled_instrument, store the selected instrument name and send to JUCE.
         // Always send the command (even with empty name) so JUCE can re-wire the audio

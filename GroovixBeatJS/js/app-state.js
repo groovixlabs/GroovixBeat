@@ -1117,9 +1117,20 @@ const AppState = {
         this.currentTrack = 0;
         this.currentLength = 64;
 
-        // Clear sample data if SampleEditor exists
+        // Clear all sample data (both legacy trackSamples and the per-clip clipSamples map)
         if (typeof SampleEditor !== 'undefined') {
             SampleEditor.trackSamples = [];
+            SampleEditor.clipSamples = {};
+        }
+
+        // Clear VST instrument assignments so no stale plugin is shown or auto-connected
+        if (typeof InstrumentSelector !== 'undefined') {
+            InstrumentSelector.trackInstruments = {};
+        }
+
+        // Reset graph-wiring cache so _ensureGraphWired() rewires every track on next play
+        if (typeof AudioBridge !== 'undefined') {
+            AudioBridge._wiredInstruments = {};
         }
 
         // Reinitialize clips and all arrays

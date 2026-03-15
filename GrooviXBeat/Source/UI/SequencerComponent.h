@@ -143,6 +143,11 @@ private:
     // Wire a track to its DrumKitPlugin (called when switching to drum_kit type)
     void setupDrumKitTrack(int trackIndex);
 
+    // Re-wire a track back to its SamplePlayerPlugin (called when switching to sample type).
+    // Removes any VST instrument / sampler / drum-kit node that was previously occupying
+    // the audio slot, then restores SamplePlayer → Mixer → Master connections.
+    void setupSamplePlayerTrack(int trackIndex);
+
     // Setup the master mixer node (inserted between all track mixers and the audio output)
     void setupMasterMixer();
 

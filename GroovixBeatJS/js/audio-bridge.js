@@ -215,6 +215,10 @@ function JSFunctionForCallingFromJUCE(funcname,args)
             window.connectToJUCE();
         }
 
+        // Reset wiring cache so _ensureGraphWired() re-wires every track on next play.
+        // This ensures VST instruments from the loaded project are properly connected.
+        AudioBridge._wiredInstruments = {};
+
         const success = AppState.deserialize(args);
         if (success) {
             // Update UI - use SongScreen object, not 'this'
@@ -315,11 +319,15 @@ const AudioBridge = {
 
     // Live mode state
     liveMode: false,
+    liveModePreloading: false,   // true while JUCE is loading samples; clips not launchable yet
     livePlayingClips: {},
     liveQueuedClips: {},
     liveStartTime: 0,
-    liveTransportStartTime: 0,   // set when first clip fires; 0 = nothing playing yet
-    liveQuantizeInterval: null,
+
+    // Graph wiring cache: tracks which VST pluginId was last sent to JUCE for each track.
+    // Used by _ensureGraphWired() to skip reloading a plugin that is already loaded.
+    // Reset on project load so new instruments are always wired correctly.
+    _wiredInstruments: {},   // { trackIndex: pluginId }
 
     // ==========================================
     // UI Methods (migrated from MidiEngine)
@@ -501,84 +509,157 @@ const AudioBridge = {
     // Live Mode (migrated from MidiEngine, JUCE paths only)
     // ==========================================
 
-    startLiveMode: function() {
-        console.log('[AudioBridge] startLiveMode called');
-        this.liveMode = true;
-        this.livePlayingClips = {};
-        this.liveQueuedClips = {};
-        this.liveStartTime = performance.now();
-        this.liveTransportStartTime = 0;
+    // Phase 1: called when user clicks the Live button.
+    // Shows loading state immediately and kicks off sample preloading in JUCE.
+    // Live mode is NOT active yet — clips cannot be launched until onLiveModePreloadComplete().
+    /**
+     * Ensure every track's audio graph is wired to match its trackType.
+     * Called before live mode and scene play so tracks don't require manual
+     * re-wiring via Track Settings.
+     *
+     * - 'sample'            → setupSamplePlayerTrack   (idempotent in C++)
+     * - 'drum_kit'          → setDrumKitTrack           (reuses existing node in C++)
+     * - 'sampled_instrument'→ setSamplerInstrument      (C++ skips if already loaded)
+     * - 'melody' + VST      → setTrackInstrument        (guarded by _wiredInstruments cache
+     *                                                    to avoid reloading the plugin)
+     * - 'melody' + no VST   → setTrackInstrument('')    (disconnects any stale node)
+     */
+    _ensureGraphWired: function() {
+        if (!this.externalHandler) return;
+        const ts = performance.now();
 
-        // Notify JUCE: clear all MIDI clips and enable live mode flag so global
-        // transport does not trigger MIDI rendering from stale clip data.
-        if (this.externalHandler) {
-            this.externalHandler({ command: 'startLiveMode', payload: {}, timestamp: performance.now() });
-        }
+        for (let t = 0; t < AppState.numTracks; t++) {
+            const trackSettings = AppState.getTrackSettings(t);
+            const trackType = trackSettings.trackType || 'melody';
 
-        this.preloadAllSamplesForLiveMode();
-        this.startLiveQuantizeLoop();
-        if (typeof SongScreen !== 'undefined') SongScreen.startPlayheadLoop();
+            if (trackType === 'sample') {
+                this.externalHandler({
+                    command: 'setupSamplePlayerTrack',
+                    payload: { trackIndex: t },
+                    timestamp: ts
+                });
 
-        if (typeof SongScreen !== 'undefined') {
-            SongScreen.updateLiveMode(true);
-            console.log('[AudioBridge] Live mode UI updated');
+            } else if (trackType === 'drum_kit') {
+                this.externalHandler({
+                    command: 'setDrumKitTrack',
+                    payload: { trackIndex: t },
+                    timestamp: ts
+                });
+
+            } else if (trackType === 'sampled_instrument') {
+                const instrumentName = trackSettings.samplerInstrument || '';
+                this.externalHandler({
+                    command: 'setSamplerInstrument',
+                    payload: { trackIndex: t, instrumentName },
+                    timestamp: ts
+                });
+
+            } else {
+                // 'melody' track — wire VST instrument if assigned.
+                const pluginId = (typeof InstrumentSelector !== 'undefined' &&
+                                  InstrumentSelector.trackInstruments[t])
+                    ? (InstrumentSelector.trackInstruments[t].id || '')
+                    : '';
+
+                // Guard: skip if we already sent this exact plugin to JUCE this session.
+                // setTrackInstrument reloads the plugin from disk, so avoid repeating it.
+                if (this._wiredInstruments[t] === pluginId) continue;
+
+                this._wiredInstruments[t] = pluginId;
+                this.externalHandler({
+                    command: 'setTrackInstrument',
+                    payload: { trackIndex: t, pluginId },
+                    timestamp: ts
+                });
+            }
         }
     },
 
-    preloadAllSamplesForLiveMode: function() {
-        if (!this.externalHandler) {
-            console.log('[AudioBridge] No external handler, skipping sample preload');
-            if (typeof SongScreen !== 'undefined') {
-                SongScreen.setLiveModeLoadingState('ready');
-            }
-            return;
+    startLiveMode: function() {
+        console.log('[AudioBridge] startLiveMode → beginLiveModePreload');
+        this.beginLiveModePreload();
+    },
+
+    beginLiveModePreload: function() {
+        if (this.liveModePreloading) return; // already preloading
+        console.log('[AudioBridge] beginLiveModePreload');
+
+        this.liveModePreloading = true;
+
+        // Clear any stale scene playback state so timingUpdate never fires stopScene()
+        // (→ midiBridge.stop() → stopAllSamples) during the preload window.
+        this.isPlayingScene = false;
+        this.sceneLength = 0;
+        this.scenePaused = false;
+        this.sceneResumeOffset = 0;
+
+        // Show loading indicator on the button right away.
+        if (typeof SongScreen !== 'undefined') {
+            SongScreen.setLiveModeLoadingState('loading');
         }
 
+        // Tell JUCE to clear MIDI clips and set its internal live-mode flag.
+        // Also sync tempo so loop-length step→sample conversion is correct from the first clip.
+        if (this.externalHandler) {
+            const ts = performance.now();
+            this.externalHandler({ command: 'setTempo', payload: { bpm: AppState.tempo || 120 }, timestamp: ts });
+            // Ensure every track's audio graph connections match its current trackType before
+            // any clip is launched, so no manual Track Settings visit is required.
+            this._ensureGraphWired();
+            this.externalHandler({ command: 'startLiveMode', payload: {}, timestamp: ts });
+        }
+
+        // Gather unique sample paths across all clips.
         const samplePaths = [];
         const seenPaths = new Set();
-
         if (typeof SampleEditor !== 'undefined' && typeof AppState !== 'undefined') {
             for (let scene = 0; scene < AppState.numScenes; scene++) {
                 for (let track = 0; track < AppState.numTracks; track++) {
-                    const trackSample = SampleEditor.getClipSample(scene, track);
-                    if (trackSample && trackSample.fullPath) {
-                        const path = trackSample.fullPath;
-                        if (!seenPaths.has(path)) {
-                            seenPaths.add(path);
-                            samplePaths.push(path);
-                        }
+                    const sample = SampleEditor.getClipSample(scene, track);
+                    if (sample && sample.fullPath && !seenPaths.has(sample.fullPath)) {
+                        seenPaths.add(sample.fullPath);
+                        samplePaths.push(sample.fullPath);
                     }
                 }
             }
         }
 
-        if (samplePaths.length > 0) {
-            if (typeof SongScreen !== 'undefined') {
-                SongScreen.setLiveModeLoadingState('loading');
-            }
-
+        if (samplePaths.length > 0 && this.externalHandler) {
             console.log('[AudioBridge] Preloading', samplePaths.length, 'samples for Live Mode');
             this.externalHandler({
                 command: 'preloadSamplesForLiveMode',
-                payload: { samplePaths: samplePaths },
+                payload: { samplePaths },
                 timestamp: performance.now()
             });
+            // onLiveModePreloadComplete() will be called by SongScreen.onSamplesPreloaded()
+            // once JUCE finishes loading.
         } else {
-            console.log('[AudioBridge] No samples to preload');
-            if (typeof SongScreen !== 'undefined') {
-                SongScreen.setLiveModeLoadingState('ready');
-            }
+            // No samples to preload (or no JUCE connection) — activate immediately.
+            console.log('[AudioBridge] No samples to preload, activating live mode immediately');
+            this.onLiveModePreloadComplete();
+        }
+    },
+
+    // Phase 2: called by SongScreen.onSamplesPreloaded() after JUCE finishes loading.
+    // Fully activates live mode: JS state, quantize loop, and UI.
+    onLiveModePreloadComplete: function() {
+        console.log('[AudioBridge] onLiveModePreloadComplete — activating live mode');
+        this.liveModePreloading = false;
+        this.liveMode = true;
+        this.livePlayingClips = {};
+        this.liveQueuedClips = {};
+        this.liveStartTime = performance.now();
+
+        if (typeof SongScreen !== 'undefined') SongScreen.startPlayheadLoop();
+
+        if (typeof SongScreen !== 'undefined') {
+            SongScreen.updateLiveMode(true);
         }
     },
 
     stopLiveMode: function() {
         this.liveMode = false;
-        this.liveTransportStartTime = 0;
-
-        if (this.liveQuantizeInterval) {
-            clearInterval(this.liveQuantizeInterval);
-            this.liveQuantizeInterval = null;
-        }
+        this.liveModePreloading = false;
 
         if (typeof SongScreen !== 'undefined') SongScreen.stopPlayheadLoop();
 
@@ -602,116 +683,90 @@ const AudioBridge = {
     },
 
     toggleLiveMode: function() {
-        console.log('[AudioBridge] toggleLiveMode called, current liveMode:', this.liveMode);
+        console.log('[AudioBridge] toggleLiveMode — liveMode:', this.liveMode, 'preloading:', this.liveModePreloading);
         if (this.liveMode) {
             this.stopLiveMode();
-        } else {
-            this.startLiveMode();
+        } else if (!this.liveModePreloading) {
+            this.beginLiveModePreload();
         }
-    },
-
-    startLiveQuantizeLoop: function() {
-        if (this.liveQuantizeInterval) {
-            clearInterval(this.liveQuantizeInterval);
-        }
-
-        // This loop is now UI-only: C++ handles all audio scheduling at the boundary.
-        // The loop just moves JS state from liveQueuedClips → livePlayingClips (or removes)
-        // so the clip buttons show the correct blinking / lit state.
-        this.liveQuantizeInterval = setInterval(() => {
-            if (!this.liveMode) return;
-            if (!this.liveTransportStartTime) return;
-
-            const tempo = AppState.tempo || 120;
-            const msPerStep = (60 / tempo / 4) * 1000;
-            const elapsed = performance.now() - this.liveTransportStartTime;
-            const currentStep = elapsed / msPerStep;
-
-            let uiDirty = false;
-
-            for (const trackIndex in this.liveQueuedClips) {
-                const queued = this.liveQueuedClips[trackIndex];
-                const track = parseInt(trackIndex);
-                const quantize = AppState.songQuantize || 4;
-                const stepInQuantize = currentStep % quantize;
-
-                if (stepInQuantize < 0.5 || stepInQuantize > quantize - 0.5) {
-                    if (queued.action === 'play') {
-                        // C++ already started the audio; update JS UI state to "playing"
-                        const clip = AppState.clips[queued.scene]?.[queued.track];
-                        const trackSettings = AppState.getTrackSettings(track);
-                        const isSampleTrack = trackSettings.trackType === 'sample';
-                        const clipLength = (clip && clip.length) || 64;
-                        const secondsPerStep = 60 / tempo / 4;
-                        this.livePlayingClips[track] = {
-                            scene: queued.scene, track: queued.track,
-                            startTime: performance.now(),
-                            loopStartTime: performance.now(),
-                            clipLength, secondsPerStep,
-                            scheduledNotes: [], loopTimeout: null,
-                            isSampleTrack,
-                            playbackMode: (clip && clip.playMode) || 'loop',
-                            isExternal: true
-                        };
-                    } else if (queued.action === 'stop') {
-                        // C++ already stopped the audio; update JS UI state to "not playing"
-                        delete this.livePlayingClips[track];
-                        if (Object.keys(this.livePlayingClips).length === 0) {
-                            this.liveTransportStartTime = 0;
-                        }
-                    }
-                    delete this.liveQueuedClips[trackIndex];
-                    uiDirty = true;
-                }
-            }
-
-            if (uiDirty && typeof SongScreen !== 'undefined') {
-                SongScreen.updateLiveClipStates();
-            }
-        }, 10);
+        // If preloading is in progress, ignore the click.
     },
 
     queueLiveClip: function(sceneIndex, trackIndex) {
-        const playing = this.livePlayingClips[trackIndex];
+        if (!this.liveMode) return;
 
-        if (playing && playing.scene === sceneIndex && playing.track === trackIndex) {
-            // Clicking the already-playing clip: queue a stop at the next quantize boundary
-            if (this.liveQueuedClips[trackIndex] && this.liveQueuedClips[trackIndex].action === 'stop') {
-                // Already queued to stop — cancel it (just clear UI; C++ will handle via its own state)
-                delete this.liveQueuedClips[trackIndex];
-            } else {
-                this.liveQueuedClips[trackIndex] = { scene: sceneIndex, track: trackIndex, action: 'stop' };
-                // Immediately tell C++ to stop at the next quantize boundary
-                const timestamp = performance.now();
-                if (this.externalHandler) {
-                    if (playing.isSampleTrack) {
-                        this.externalHandler({ command: 'queueStopSample', payload: { trackIndex }, timestamp });
+        const playing = this.livePlayingClips[trackIndex];
+        const queued  = this.liveQueuedClips[trackIndex];
+
+        if (playing && playing.scene === sceneIndex) {
+            const trackSettings = AppState.getTrackSettings(trackIndex);
+            const isSample = trackSettings.trackType === 'sample';
+
+            if (isSample) {
+                // Sample tracks: mute/unmute instead of stop/start so transport keeps running
+                if (playing.muted) {
+                    // Currently muted — queue unmute (or cancel pending mute)
+                    if (queued && queued.action === 'mute') {
+                        delete this.liveQueuedClips[trackIndex];
+                        if (this.externalHandler)
+                            this.externalHandler({ command: 'cancelQueuedSample', payload: { trackIndex }, timestamp: performance.now() });
                     } else {
-                        this.externalHandler({ command: 'queueLiveMidiStop', payload: { trackIndex }, timestamp });
+                        this.liveQueuedClips[trackIndex] = { scene: sceneIndex, track: trackIndex, action: 'unmute' };
+                        if (this.externalHandler)
+                            this.externalHandler({ command: 'queueUnmuteSample', payload: { trackIndex }, timestamp: performance.now() });
                     }
+                } else {
+                    // Currently playing (not muted) — queue mute (or cancel pending unmute)
+                    if (queued && queued.action === 'unmute') {
+                        delete this.liveQueuedClips[trackIndex];
+                        if (this.externalHandler)
+                            this.externalHandler({ command: 'cancelQueuedSample', payload: { trackIndex }, timestamp: performance.now() });
+                    } else {
+                        this.liveQueuedClips[trackIndex] = { scene: sceneIndex, track: trackIndex, action: 'mute' };
+                        if (this.externalHandler)
+                            this.externalHandler({ command: 'queueMuteSample', payload: { trackIndex }, timestamp: performance.now() });
+                    }
+                }
+            } else {
+                // MIDI tracks: stop/start as before
+                if (queued && queued.action === 'stop') {
+                    delete this.liveQueuedClips[trackIndex];
+                    if (this.externalHandler)
+                        this.externalHandler({ command: 'cancelQueuedSample', payload: { trackIndex }, timestamp: performance.now() });
+                } else {
+                    this.liveQueuedClips[trackIndex] = { scene: sceneIndex, track: trackIndex, action: 'stop' };
+                    if (this.externalHandler)
+                        this.externalHandler({ command: 'queueLiveMidiStop', payload: { trackIndex }, timestamp: performance.now() });
                 }
             }
         } else {
-            // Check if anything is currently playing or queued
-            const nothingActive = Object.keys(this.livePlayingClips).length === 0 &&
-                                  Object.keys(this.liveQueuedClips).length === 0;
-
-            if (nothingActive) {
-                // First clip — start immediately at Time 0, anchor the quantize grid
-                this.liveTransportStartTime = performance.now();
-                this.executeLiveClipStart(trackIndex, sceneIndex, trackIndex, /*seamless=*/false);
+            // Clip is not playing — queue to start
+            if (queued && queued.action === 'play') {
+                // Already queued — cancel
+                delete this.liveQueuedClips[trackIndex];
+                const trackSettings = AppState.getTrackSettings(trackIndex);
+                const isSample = trackSettings.trackType === 'sample';
+                if (this.externalHandler) {
+                    // Sample tracks: cancelQueuedSample clears the pending file in SamplePlayerManager.
+                    // MIDI tracks: queueLiveMidiStop cancels the pendingLivePlay flag in MidiClipScheduler.
+                    const cancelCmd = isSample ? 'cancelQueuedSample' : 'queueLiveMidiStop';
+                    this.externalHandler({ command: cancelCmd, payload: { trackIndex }, timestamp: performance.now() });
+                }
             } else {
-                // Something already playing — queue to next quantize boundary
-                // Add to UI queued state (shows blinking)
                 this.liveQueuedClips[trackIndex] = { scene: sceneIndex, track: trackIndex, action: 'play' };
-                // Immediately send C++ the command — C++ fires it at the boundary sample-accurately
-                this._sendLiveClipToCpp(trackIndex, sceneIndex, /*seamless=*/true);
+                const isFirst = Object.keys(this.livePlayingClips).length === 0 &&
+                                Object.keys(this.liveQueuedClips).length === 1; // just added
+                this._sendLiveClipToCpp(trackIndex, sceneIndex, /*seamless=*/!isFirst);
+                // For the immediate (first-clip) case, JS updates livePlayingClips right away
+                // since there is no quantize delay.
+                if (isFirst) {
+                    this.onLiveClipStarted(trackIndex);
+                }
+                // For seamless (quantized) case, JUCE will call onLiveClipStarted when it fires.
             }
         }
 
-        if (typeof SongScreen !== 'undefined') {
-            SongScreen.updateLiveClipStates();
-        }
+        if (typeof SongScreen !== 'undefined') SongScreen.updateLiveClipStates();
     },
 
     // Trigger an entire scene in Live Mode.
@@ -748,17 +803,15 @@ const AudioBridge = {
         const timestamp = performance.now();
 
         if (nothingActive) {
-            // No clips playing — start all scene clips immediately and anchor the grid
-            this.liveTransportStartTime = timestamp;
+            // No clips playing — start all scene clips immediately (seamless=false).
+            // Immediate starts have no targetStartSample, so JUCE won't fire a callback;
+            // call onLiveClipStarted directly for all tracks.
             for (const track of tracksToStart) {
-                this.executeLiveClipStart(track, sceneIndex, track, /*seamless=*/false);
+                this.liveQueuedClips[track] = { scene: sceneIndex, track: track, action: 'play' };
+                this._sendLiveClipToCpp(track, sceneIndex, /*seamless=*/false);
+                this.onLiveClipStarted(track);
             }
         } else {
-            // Ensure the transport anchor is set
-            if (!this.liveTransportStartTime) {
-                this.liveTransportStartTime = timestamp;
-            }
-
             // Queue stops for all playing tracks that won't be in the new scene
             for (const trackIndex in this.livePlayingClips) {
                 const track = parseInt(trackIndex);
@@ -825,6 +878,11 @@ const AudioBridge = {
                     const offset = trackSample.offset || 0;
                     const loop = playbackMode === 'loop';
                     this.externalHandler({
+                        command: 'setTempo',
+                        payload: { bpm: AppState.tempo || 120 },
+                        timestamp
+                    });
+                    this.externalHandler({
                         command: 'playSampleFile',
                         payload: { trackIndex, filePath, offset, loop, loopLengthSteps: clipLength, seamless },
                         timestamp
@@ -890,6 +948,14 @@ const AudioBridge = {
                     const offset = trackSample.offset || 0;
                     const loop = playbackMode === 'loop';
 
+                    // Always sync tempo before playSampleFile so JUCE converts
+                    // loopLengthSteps → loopLengthSamples with the correct BPM.
+                    this.externalHandler({
+                        command: 'setTempo',
+                        payload: { bpm: AppState.tempo || 120 },
+                        timestamp
+                    });
+
                     this.externalHandler({
                         command: 'playSampleFile',
                         payload: {
@@ -939,19 +1005,87 @@ const AudioBridge = {
             });
         }
 
-        this.livePlayingClips[trackIndex] = {
-            scene: sceneIndex,
-            track: clipTrackIndex,
+        // Note: livePlayingClips is updated by onLiveClipStarted() when JUCE fires the
+        // actual start event. For immediate (first-clip) MIDI, queueLiveClip calls
+        // onLiveClipStarted() directly. For sample tracks, JUCE fires the callback.
+    },
+
+    // Called by JUCE when a live-mode clip actually starts at the quantize boundary.
+    onLiveClipStarted: function(trackIndex) {
+        const track = parseInt(trackIndex);
+        const queued = this.liveQueuedClips[track];
+        if (!queued) return;
+
+        const clip = AppState.clips[queued.scene]?.[queued.track];
+        const trackSettings = AppState.getTrackSettings(track);
+        const tempo = AppState.tempo || 120;
+        const clipLength = (clip && clip.length) || 64;
+
+        this.livePlayingClips[track] = {
+            scene: queued.scene,
+            track: queued.track,
             startTime: performance.now(),
-            loopStartTime: performance.now(),
-            clipLength: clipLength,
-            secondsPerStep: secondsPerStep,
+            clipLength,
+            secondsPerStep: 60 / tempo / 4,
             scheduledNotes: [],
             loopTimeout: null,
-            isSampleTrack: isSampleTrack,
-            playbackMode: playbackMode,
+            isSampleTrack: trackSettings.trackType === 'sample',
+            playbackMode: (clip && clip.playMode) || 'loop',
             isExternal: true
         };
+        delete this.liveQueuedClips[track];
+
+        if (typeof SongScreen !== 'undefined') SongScreen.updateLiveClipStates();
+    },
+
+    // Called by JUCE when a live-mode clip actually stops at the quantize boundary.
+    onLiveClipStopped: function(trackIndex) {
+        const track = parseInt(trackIndex);
+        delete this.livePlayingClips[track];
+        delete this.liveQueuedClips[track];
+
+        if (typeof SongScreen !== 'undefined') SongScreen.updateLiveClipStates();
+    },
+
+    // Called by JUCE when a sample-accurate mute fires at the quantize boundary.
+    onLiveClipMuted: function(trackIndex) {
+        const track = parseInt(trackIndex);
+        if (this.livePlayingClips[track]) {
+            this.livePlayingClips[track].muted = true;
+        }
+        delete this.liveQueuedClips[track];
+
+        if (typeof SongScreen !== 'undefined') SongScreen.updateLiveClipStates();
+    },
+
+    // Called by JUCE when a sample-accurate unmute fires at the quantize boundary.
+    onLiveClipUnmuted: function(trackIndex) {
+        const track = parseInt(trackIndex);
+        if (this.livePlayingClips[track]) {
+            this.livePlayingClips[track].muted = false;
+            // Reset startTime so the JS playhead animation restarts from step 0.
+            this.livePlayingClips[track].startTime = performance.now();
+        }
+        delete this.liveQueuedClips[track];
+
+        if (typeof SongScreen !== 'undefined') SongScreen.updateLiveClipStates();
+    },
+
+    isLiveClipMuted: function(sceneIndex, trackIndex) {
+        const playing = this.livePlayingClips[trackIndex];
+        return playing && playing.scene === sceneIndex && playing.muted === true;
+    },
+
+    isLiveClipMuting: function(sceneIndex, trackIndex) {
+        const queued = this.liveQueuedClips[trackIndex];
+        const playing = this.livePlayingClips[trackIndex];
+        return queued && queued.action === 'mute' && playing && playing.scene === sceneIndex;
+    },
+
+    isLiveClipUnmuting: function(sceneIndex, trackIndex) {
+        const queued = this.liveQueuedClips[trackIndex];
+        const playing = this.livePlayingClips[trackIndex];
+        return queued && queued.action === 'unmute' && playing && playing.scene === sceneIndex;
     },
 
     executeLiveClipStop: function(trackIndex) {
@@ -983,12 +1117,6 @@ const AudioBridge = {
             }
         }
         delete this.livePlayingClips[trackIndex];
-
-        // If no clips are playing anymore, reset the transport anchor so the
-        // next click starts instantly again (Time 0).
-        if (Object.keys(this.livePlayingClips).length === 0) {
-            this.liveTransportStartTime = 0;
-        }
     },
 
     isLiveClipPlaying: function(sceneIndex, trackIndex) {
@@ -1009,9 +1137,9 @@ const AudioBridge = {
 
     getLiveClipPlayheadStep: function(trackIndex) {
         const playing = this.livePlayingClips[trackIndex];
-        if (!playing) return -1;
+        if (!playing || playing.muted) return -1;
 
-        const elapsed = (performance.now() - playing.loopStartTime) / 1000;
+        const elapsed = (performance.now() - playing.startTime) / 1000;
         const currentStep = elapsed / playing.secondsPerStep;
 
         return currentStep % playing.clipLength;
@@ -1031,6 +1159,9 @@ const AudioBridge = {
         const playBtn = document.getElementById('clipPlayBtn');
         if (playBtn) {
             playBtn.addEventListener('click', () => {
+                // In Live Mode these clip-level transport buttons must not interfere
+                // with the live session — clips are controlled via the grid instead.
+                if (this.liveMode) return;
                 if (this.isInSampleMode() && typeof SampleEditor !== 'undefined') {
                     SampleEditor.togglePlay();
                 } else {
@@ -1042,6 +1173,7 @@ const AudioBridge = {
         const stopBtn = document.getElementById('clipStopBtn');
         if (stopBtn) {
             stopBtn.addEventListener('click', () => {
+                if (this.liveMode) return;
                 this.stopClip();
                 if (this.isInSampleMode() && typeof SampleEditor !== 'undefined') {
                     SampleEditor.stop();
@@ -1052,6 +1184,7 @@ const AudioBridge = {
         const playAllBtn = document.getElementById('playAllTracksBtn');
         if (playAllBtn) {
             playAllBtn.addEventListener('click', () => {
+                if (this.liveMode) return;
                 this.toggleScene();
             });
         }
@@ -1059,6 +1192,7 @@ const AudioBridge = {
         const stopAllBtn = document.getElementById('stopAllTracksBtn');
         if (stopAllBtn) {
             stopAllBtn.addEventListener('click', () => {
+                if (this.liveMode) return;
                 this.stopScene();
             });
         }
@@ -1070,6 +1204,9 @@ const AudioBridge = {
 
             if (e.code === 'Space' && !e.ctrlKey && !e.metaKey) {
                 e.preventDefault();
+                // Space bar must not call stopClip() in Live Mode — that routes through
+                // midiBridge.stop() which kills ALL sample players, not just one clip.
+                if (this.liveMode) return;
                 if (this.isInSampleMode() && typeof SampleEditor !== 'undefined') {
                     SampleEditor.togglePlay();
                 } else {
@@ -1394,6 +1531,12 @@ const AudioBridge = {
         else if (command === 'queueLiveScene') {
             this.queueLiveScene(payload.sceneIndex);
         }
+        else if (command === 'liveClipStarted') {
+            this.onLiveClipStarted(payload.trackIndex);
+        }
+        else if (command === 'liveClipStopped') {
+            this.onLiveClipStopped(payload.trackIndex);
+        }
         // All other commands pass through directly
         else {
             this.externalHandler({ command, payload, timestamp });
@@ -1456,6 +1599,9 @@ const AudioBridge = {
                 }
             }
         }
+
+        // Ensure every track's audio graph is wired for its current type before playing.
+        this._ensureGraphWired();
 
         // Stop any existing playback and clear clips from previous scene
         this.externalHandler({ command: 'stopScene', payload: {}, timestamp });
@@ -2070,7 +2216,10 @@ const AudioBridge = {
                         this.isPlaying = message.isPlaying === true || message.isPlaying === 'true';
 
                         // Check if scene has reached the end (including repeats)
-                        if (this.sceneLength && position >= this.sceneLength) {
+                        // Do NOT trigger stopScene() in Live Mode: transport runs
+                        // continuously and stale sceneLength from a prior scene play
+                        // would kill all live samples via midiBridge.stop().
+                        if (!this.liveMode && this.sceneLength && position >= this.sceneLength) {
                             this.stopScene();
                         } else {
                             // Wrap playhead within single iteration for UI display
@@ -2112,8 +2261,8 @@ const AudioBridge = {
                                         // Wrap playhead position for UI display only
                                         // JUCE handles the actual audio looping
                                         this.playheadStep = position % clipLength;
-                                    } else {
-                                        // One-shot mode - stop playback
+                                    } else if (!this.liveMode) {
+                                        // One-shot mode - stop playback (not in Live Mode)
                                         console.log('[AudioBridge] Clip reached end (one-shot mode), stopping playback. Track:', track, 'Mode:', playbackMode);
                                         this.stopClip();
                                     }

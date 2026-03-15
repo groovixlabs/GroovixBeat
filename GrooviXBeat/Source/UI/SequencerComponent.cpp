@@ -1111,6 +1111,36 @@ SequencerComponent::SequencerComponent (GraphDocumentComponent& graphDoc, Plugin
     DBG("SequencerComponent - setSamplePlayerManager done, ptr: " +
         juce::String((juce::int64)&samplePlayerManager));
 
+    // Register live-mode clip start/stop callback: fires on the message thread when a sample
+    // clip actually starts or stops at its sample-accurate quantize boundary.
+    midiBridge.setLiveClipEventCallback([this](int trackIndex, bool isStart)
+    {
+        juce::String js = isStart
+            ? ("if(typeof AudioBridge!=='undefined') AudioBridge.onLiveClipStarted(" + juce::String(trackIndex) + ");")
+            : ("if(typeof AudioBridge!=='undefined') AudioBridge.onLiveClipStopped(" + juce::String(trackIndex) + ");");
+        evaluateJavaScript(js);
+    });
+
+    // Register live-mode mute/unmute callback: fires on the message thread when a sample
+    // clip is muted or unmuted at its sample-accurate quantize boundary.
+    midiBridge.setLiveClipMuteCallback([this](int trackIndex, bool isMuted)
+    {
+        juce::String js = isMuted
+            ? ("if(typeof AudioBridge!=='undefined') AudioBridge.onLiveClipMuted(" + juce::String(trackIndex) + ");")
+            : ("if(typeof AudioBridge!=='undefined') AudioBridge.onLiveClipUnmuted(" + juce::String(trackIndex) + ");");
+        evaluateJavaScript(js);
+    });
+
+    // Register live-mode MIDI clip start/stop callback: fires on the message thread when a
+    // MIDI clip actually starts or stops at its quantize boundary (mirrors sample callback above).
+    midiBridge.setLiveMidiClipEventCallback([this](int trackIndex, bool isStart)
+    {
+        juce::String js = isStart
+            ? ("if(typeof AudioBridge!=='undefined') AudioBridge.onLiveClipStarted(" + juce::String(trackIndex) + ");")
+            : ("if(typeof AudioBridge!=='undefined') AudioBridge.onLiveClipStopped(" + juce::String(trackIndex) + ");");
+        evaluateJavaScript(js);
+    });
+
     // Connect MidiTrackOutputManager to MidiBridge
     midiBridge.setMidiTrackOutputManager(&midiTrackOutputManager);
     DBG("SequencerComponent - setMidiTrackOutputManager done, ptr: " +
@@ -1523,6 +1553,24 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
 
         midiBridge.updateClip(trackIndex, notes);
     }
+    else if (command == "setClipLoopLength")
+    {
+        int trackIndex        = payload.getProperty("trackIndex", 0);
+        double loopLengthSteps = payload.getProperty("loopLengthSteps", 64.0);
+        // loopLengthSteps is in 1/16th notes; 4 steps = 1 beat (quarter note)
+        double loopLengthBeats = loopLengthSteps / 4.0;
+
+        DBG("setClipLoopLength: track=" + juce::String(trackIndex)
+            + " steps=" + juce::String(loopLengthSteps)
+            + " beats=" + juce::String(loopLengthBeats));
+
+        // Update sample player loop length (applies immediately to the running transport).
+        if (auto* manager = midiBridge.getSamplePlayerManager())
+            manager->setTrackLoopLengthBeats(trackIndex, loopLengthBeats);
+
+        // Re-schedule MIDI clip with the new loop length so the scheduler uses it.
+        midiBridge.getClipScheduler().setClipLoopLength(trackIndex, loopLengthSteps);
+    }
     else if (command == "clearClip")
     {
         int trackIndex = payload.getProperty("trackIndex", 0);
@@ -1583,6 +1631,7 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
     else if (command == "startLiveMode")
     {
         DBG("startLiveMode: entering live mode - clearing clips, enabling live mode flag");
+        midiBridge.stopSongMode();  // Clear any stale inSongMode from a previous song play
         midiBridge.clearAllClips();
         midiBridge.setLiveMode(true);
     }
@@ -1705,9 +1754,6 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
             DBG("playSampleFile: Setting up sample players on first use");
             setupSamplePlayersForTracks(8);
         }
-
-        // Verify connections are in place before playing
-        ensureSamplePlayerConnections();
 
         if (seamless)
         {
@@ -1924,6 +1970,18 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
 
         midiBridge.queueStopSample(trackIndex);
     }
+    else if (command == "queueMuteSample")
+    {
+        int trackIndex = payload.getProperty("trackIndex", 0);
+        DBG("queueMuteSample: track=" + juce::String(trackIndex));
+        midiBridge.queueMuteSample(trackIndex);
+    }
+    else if (command == "queueUnmuteSample")
+    {
+        int trackIndex = payload.getProperty("trackIndex", 0);
+        DBG("queueUnmuteSample: track=" + juce::String(trackIndex));
+        midiBridge.queueUnmuteSample(trackIndex);
+    }
     else if (command == "cancelQueuedSample")
     {
         int trackIndex = payload.getProperty("trackIndex", 0);
@@ -2100,6 +2158,14 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
         int trackIndex = payload.getProperty("trackIndex", 0);
         DBG("setDrumKitTrack: track=" + juce::String(trackIndex));
         setupDrumKitTrack(trackIndex);
+    }
+    else if (command == "setupSamplePlayerTrack")
+    {
+        // Switch a track back to sample-player type: remove VST/sampler/drum nodes
+        // and restore SamplePlayer → Mixer → Master connections.
+        int trackIndex = payload.getProperty("trackIndex", 0);
+        DBG("setupSamplePlayerTrack: track=" + juce::String(trackIndex));
+        setupSamplePlayerTrack(trackIndex);
     }
     else if (command == "setDrumKitSample")
     {
@@ -3969,6 +4035,116 @@ void SequencerComponent::setupDrumKitTrack(int trackIndex)
     pluginGraph.graph.addConnection({{ mixerNodeId, 1 }, { finalNodeId, 1 }});
 
     DBG("setupDrumKitTrack: completed for track " + juce::String(trackIndex));
+}
+
+//==============================================================================
+void SequencerComponent::setupSamplePlayerTrack(int trackIndex)
+{
+    DBG("setupSamplePlayerTrack: re-wiring sample player for track " + juce::String(trackIndex));
+
+    // --- 1. Remove VST instrument node (if any) ---
+    auto instrIt = trackInstrumentNodes.find(trackIndex);
+    if (instrIt != trackInstrumentNodes.end())
+    {
+        auto conns = pluginGraph.graph.getConnections();
+        for (const auto& conn : conns)
+            if (conn.source.nodeID == instrIt->second || conn.destination.nodeID == instrIt->second)
+                pluginGraph.graph.removeConnection(conn);
+
+        pluginGraph.graph.removeNode(instrIt->second);
+        trackInstrumentNodes.erase(instrIt);
+        DBG("setupSamplePlayerTrack: removed VST instrument node for track " + juce::String(trackIndex));
+    }
+
+    // --- 2. Remove sampler instrument node (if any) ---
+    auto samplerIt = samplerInstrumentNodes.find(trackIndex);
+    if (samplerIt != samplerInstrumentNodes.end())
+    {
+        auto conns = pluginGraph.graph.getConnections();
+        for (const auto& conn : conns)
+            if (conn.source.nodeID == samplerIt->second || conn.destination.nodeID == samplerIt->second)
+                pluginGraph.graph.removeConnection(conn);
+
+        pluginGraph.graph.removeNode(samplerIt->second);
+        samplerInstrumentNodes.erase(samplerIt);
+        DBG("setupSamplePlayerTrack: removed sampler node for track " + juce::String(trackIndex));
+    }
+
+    // --- 3. Remove drum kit node (if any) ---
+    auto drumIt = drumKitNodes.find(trackIndex);
+    if (drumIt != drumKitNodes.end())
+    {
+        auto conns = pluginGraph.graph.getConnections();
+        for (const auto& conn : conns)
+            if (conn.source.nodeID == drumIt->second || conn.destination.nodeID == drumIt->second)
+                pluginGraph.graph.removeConnection(conn);
+
+        pluginGraph.graph.removeNode(drumIt->second);
+        drumKitNodes.erase(drumIt);
+        DBG("setupSamplePlayerTrack: removed drum kit node for track " + juce::String(trackIndex));
+    }
+
+    // --- 4. Restore SamplePlayer → Mixer → Master connections ---
+    auto sampleIt = samplePlayerNodes.find(trackIndex);
+    auto mixerIt  = trackMixerNodes.find(trackIndex);
+
+    if (sampleIt == samplePlayerNodes.end())
+    {
+        DBG("setupSamplePlayerTrack: no SamplePlayerPlugin node for track " + juce::String(trackIndex) + " — nothing to connect");
+        return;
+    }
+
+    if (mixerIt == trackMixerNodes.end())
+    {
+        DBG("setupSamplePlayerTrack: no mixer node for track " + juce::String(trackIndex) + " — cannot connect");
+        return;
+    }
+
+    auto sampleNodeId = sampleIt->second;
+    auto mixerNodeId  = mixerIt->second;
+
+    juce::AudioProcessorGraph::NodeID finalNodeId;
+    if (masterMixerCreated)
+    {
+        finalNodeId = masterMixerNodeId;
+    }
+    else
+    {
+        bool foundOutput = false;
+        for (auto* node : pluginGraph.graph.getNodes())
+        {
+            if (auto* io = dynamic_cast<juce::AudioProcessorGraph::AudioGraphIOProcessor*>(node->getProcessor()))
+            {
+                if (io->getType() == juce::AudioProcessorGraph::AudioGraphIOProcessor::audioOutputNode)
+                {
+                    finalNodeId = node->nodeID;
+                    foundOutput = true;
+                    break;
+                }
+            }
+        }
+        if (!foundOutput)
+        {
+            DBG("setupSamplePlayerTrack: audio output node not found for track " + juce::String(trackIndex));
+            return;
+        }
+    }
+
+    // Remove any stale connections into/out of the mixer before re-adding so we
+    // don't accumulate duplicates from previous track-type switches.
+    {
+        auto conns = pluginGraph.graph.getConnections();
+        for (const auto& conn : conns)
+            if (conn.source.nodeID == mixerNodeId || conn.destination.nodeID == mixerNodeId)
+                pluginGraph.graph.removeConnection(conn);
+    }
+
+    pluginGraph.graph.addConnection({ { sampleNodeId, 0 }, { mixerNodeId, 0 } });
+    pluginGraph.graph.addConnection({ { sampleNodeId, 1 }, { mixerNodeId, 1 } });
+    pluginGraph.graph.addConnection({ { mixerNodeId,  0 }, { finalNodeId, 0 } });
+    pluginGraph.graph.addConnection({ { mixerNodeId,  1 }, { finalNodeId, 1 } });
+
+    DBG("setupSamplePlayerTrack: completed for track " + juce::String(trackIndex));
 }
 
 //==============================================================================

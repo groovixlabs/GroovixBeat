@@ -80,6 +80,10 @@ public:
     void cancelQueuedSample(int trackIndex);
     void triggerSampleScene(int sceneIndex, const juce::var& clipsArray);
 
+    /** Mute/unmute a sample track at the next quantize boundary without stopping the transport. */
+    void queueMuteSample(int trackIndex);
+    void queueUnmuteSample(int trackIndex);
+
     //==============================================================================
     // MIDI Clip Live Mode - Per-track playback control
     void playLiveClip(int trackIndex);
@@ -123,6 +127,20 @@ public:
      * completes.  sceneIndex = new scene index, or -1 when the song ends.
      */
     void setSongSceneChangedCallback(std::function<void(int)> callback);
+
+    /** Register a callback invoked on the message thread when a live-mode sample clip
+     *  starts or stops at its audio-accurate quantize boundary.
+     *  callback(trackIndex, isStart) */
+    void setLiveClipEventCallback(std::function<void(int, bool)> cb) { liveClipEventCallback = std::move(cb); }
+
+    /** Register a callback for mute/unmute events fired at quantize boundaries.
+     *  callback(trackIndex, isMuted) */
+    void setLiveClipMuteCallback(std::function<void(int, bool)> cb) { liveClipMuteCallback = std::move(cb); }
+
+    /** Register a callback invoked on the message thread when a live-mode MIDI clip
+     *  starts or stops at its quantize boundary.
+     *  callback(trackIndex, isStart) */
+    void setLiveMidiClipEventCallback(std::function<void(int, bool)> cb) { liveMidiClipEventCallback = std::move(cb); }
 
     //==============================================================================
     // Quantization settings
@@ -190,6 +208,9 @@ private:
     bool songHasNextScene = false;
 
     std::function<void(int)> songSceneChangedCallback;
+    std::function<void(int, bool)> liveClipEventCallback;
+    std::function<void(int, bool)> liveClipMuteCallback;
+    std::function<void(int, bool)> liveMidiClipEventCallback;
 
     struct SongSampleClip
     {

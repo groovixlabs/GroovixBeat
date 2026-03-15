@@ -91,6 +91,23 @@ void MidiClipScheduler::setClipFromVar(int trackIndex, const juce::var& notesArr
     setClip(trackIndex, notes, loopLengthSteps, program, isDrum, loop);
 }
 
+void MidiClipScheduler::setClipLoopLength(int trackIndex, double loopLengthSteps)
+{
+    juce::SpinLock::ScopedLockType sl(lock);
+
+    auto clipIt = trackClips.find(trackIndex);
+    if (clipIt == trackClips.end())
+    {
+        DBG("MidiClipScheduler::setClipLoopLength - no clip for track " + juce::String(trackIndex) + ", ignoring");
+        return;
+    }
+
+    clipIt->second.loopLengthSteps = loopLengthSteps;
+
+    DBG("MidiClipScheduler::setClipLoopLength - track " + juce::String(trackIndex)
+        + " loopLength=" + juce::String(loopLengthSteps));
+}
+
 void MidiClipScheduler::updateClipNotes(int trackIndex, const std::vector<MidiNote>& notes)
 {
     juce::SpinLock::ScopedLockType sl(lock);
@@ -574,6 +591,7 @@ void MidiClipScheduler::renderTrackBlock(int trackIndex, juce::MidiBuffer& outpu
                 state.isPlaying = true;
                 state.trackPlayStartSample = blockStartSample;
                 state.pendingLivePlay = false;
+                state.pendingStartNotification.store(true, std::memory_order_relaxed);
                 DBG("MidiClipScheduler: pending play fired immediately (no anchor), track=" + juce::String(trackIndex));
             }
             else
@@ -596,6 +614,7 @@ void MidiClipScheduler::renderTrackBlock(int trackIndex, juce::MidiBuffer& outpu
                     state.trackPlayStartSample = blockStartSample + boundarySampleOffset;
                     state.oneshotFinished = false;
                     state.pendingLivePlay = false;
+                    state.pendingStartNotification.store(true, std::memory_order_relaxed);
 
                     DBG("MidiClipScheduler: pending play fired at boundary step=" +
                         juce::String(nextBoundary) + " track=" + juce::String(trackIndex));
@@ -615,6 +634,7 @@ void MidiClipScheduler::renderTrackBlock(int trackIndex, juce::MidiBuffer& outpu
                 state.clearActiveNotes();
                 state.isPlaying = false;
                 state.pendingLiveStop = false;
+                state.pendingStopNotification.store(true, std::memory_order_relaxed);
             }
             else
             {
@@ -638,10 +658,11 @@ void MidiClipScheduler::renderTrackBlock(int trackIndex, juce::MidiBuffer& outpu
                     state.clearActiveNotes();
                     state.isPlaying = false;
                     state.pendingLiveStop = false;
+                    state.pendingStopNotification.store(true, std::memory_order_relaxed);
 
-                    // Clear clip notes so global transport cannot re-render them
-                    if (clipIt2 != trackClips.end())
-                        clipIt2->second.notes.clear();
+                    // NOTE: Do NOT clear clip.notes here. In live mode effectiveGlobal=false,
+                    // so global transport never re-renders these notes anyway. Clearing them
+                    // breaks queueTrackPlay's hasNotes() check on the next restart.
 
                     // Reset live anchor if no tracks remain active
                     bool anyActive = false;
@@ -884,6 +905,24 @@ int64_t MidiClipScheduler::computeNextQuantizeBoundarySample() const
         nextBoundary += qSteps;
 
     return anchor + static_cast<int64_t>(std::round(nextBoundary * samplesPerStep));
+}
+
+//==============================================================================
+// Notification consumption (message thread)
+
+void MidiClipScheduler::consumeNotifications(std::function<void(int, bool)> callback)
+{
+    // Iterate trackPlayStates without the spin lock — we only touch atomics here,
+    // and the map itself is only modified from the message thread (same thread as
+    // the caller), so no concurrent map mutation can occur.
+    for (auto& pair : trackPlayStates)
+    {
+        if (pair.second.pendingStartNotification.exchange(false, std::memory_order_acq_rel))
+            callback(pair.first, true);
+
+        if (pair.second.pendingStopNotification.exchange(false, std::memory_order_acq_rel))
+            callback(pair.first, false);
+    }
 }
 
 //==============================================================================

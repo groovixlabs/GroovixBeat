@@ -147,6 +147,7 @@ const InstrumentSelector = {
             delete this.trackInstruments[this.currentTrack];
 
             if (typeof AudioBridge !== 'undefined') {
+                AudioBridge._wiredInstruments[this.currentTrack] = '';
                 AudioBridge.send('setTrackInstrument', {
                     trackIndex: this.currentTrack,
                     pluginId: ''
@@ -165,6 +166,8 @@ const InstrumentSelector = {
             };
 
             if (typeof AudioBridge !== 'undefined') {
+                // Update wiring cache so _ensureGraphWired() doesn't reload this plugin.
+                AudioBridge._wiredInstruments[this.currentTrack] = instrument.name;
                 AudioBridge.send('setTrackInstrument', {
                     trackIndex: this.currentTrack,
                     pluginId: instrument.name

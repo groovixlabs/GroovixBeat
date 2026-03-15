@@ -116,19 +116,27 @@ void SamplePlayerManager::playSampleFile(int trackIndex,
     {
         bool loaded = false;
 
-        // Check cache first for instant loading
+        // Check cache first for instant loading.
+        // Copy the raw pointer under cacheLock, then fit/load outside (same message thread,
+        // so the pointer stays valid between releasing cacheLock and using it).
+        const juce::AudioBuffer<float>* rawBuf    = nullptr;
+        double                          rawSampleRate = 0.0;
         {
             juce::ScopedLock sl(cacheLock);
             auto it = sampleCache.find(filePath);
             if (it != sampleCache.end() && it->second != nullptr)
             {
-                DBG("SamplePlayerManager::playSampleFile - LOADING FROM CACHE");
-                loaded = player->loadFromCachedBuffer(filePath, it->second->buffer, it->second->sampleRate);
-                if (loaded)
-                {
-                    DBG("SamplePlayerManager::playSampleFile - Loaded from cache successfully");
-                }
+                rawBuf       = &it->second->buffer;
+                rawSampleRate = it->second->sampleRate;
             }
+        }
+        if (rawBuf != nullptr)
+        {
+            DBG("SamplePlayerManager::playSampleFile - LOADING FROM CACHE");
+            auto fitted = fitBufferToLoopLength(*rawBuf, rawSampleRate, loopLengthBeats, currentBpm);
+            loaded = player->loadFromCachedBuffer(filePath, fitted, rawSampleRate);
+            if (loaded)
+                DBG("SamplePlayerManager::playSampleFile - Loaded from cache successfully");
         }
 
         // Fall back to file loading if not in cache
@@ -205,17 +213,25 @@ void SamplePlayerManager::stopSampleFile(int trackIndex)
 
 void SamplePlayerManager::stopAllSamples()
 {
-    juce::ScopedLock sl(lock);
-
-    DBG("SamplePlayerManager::stopAllSamples - " + juce::String((int)trackPlayers.size()) + " players");
-
-    for (auto& pair : trackPlayers)
+    // Collect player pointers under lock, then call stop() outside the lock.
+    // SamplePlayerPlugin::stop() calls transportSource.stop() which blocks until
+    // the audio callback acks the stop.  Holding the manager lock here would
+    // prevent any concurrent getPlayerForTrack() calls from returning, which in
+    // pathological cases could cause priority inversion on the audio thread.
+    std::vector<SamplePlayerPlugin*> players;
     {
-        if (pair.second != nullptr)
-        {
-            DBG("SamplePlayerManager::stopAllSamples - stopping track " + juce::String(pair.first));
-            pair.second->stop();
-        }
+        juce::ScopedLock sl(lock);
+        DBG("SamplePlayerManager::stopAllSamples - " + juce::String((int)trackPlayers.size()) + " players");
+        players.reserve(trackPlayers.size());
+        for (auto& pair : trackPlayers)
+            if (pair.second != nullptr)
+                players.push_back(pair.second);
+    }
+
+    for (auto* player : players)
+    {
+        DBG("SamplePlayerManager::stopAllSamples - stopping track " + juce::String(player->getTrackIndex()));
+        player->stop();
     }
 
     DBG("SamplePlayerManager: Stopped all samples");
@@ -281,40 +297,79 @@ void SamplePlayerManager::queueSampleFileSeamless(int trackIndex,
         return;
     }
 
-    bool queued = false;
+    // Load into a buffer (from cache or disk), resize to exact loop length, then
+    // hand to the player as a pending cached buffer.  This guarantees that the
+    // audio delivered to the player is sample-accurate: longer files are truncated
+    // at the loop boundary; shorter files are zero-padded so the loop wraps cleanly.
+    juce::AudioBuffer<float> workBuffer;
+    double workSampleRate = 0.0;
+    bool   loaded         = false;
 
-    // Check cache first for instant pending load
     {
-        juce::ScopedLock sl(cacheLock);
-        auto it = sampleCache.find(filePath);
-        if (it != sampleCache.end() && it->second != nullptr)
+        // Hold cacheLock only long enough to copy the raw buffer pointer and metadata.
+        // fitBufferToLoopLength() does a large allocation + copy — doing it inside
+        // cacheLock would block other cache accesses for tens of milliseconds.
+        const juce::AudioBuffer<float>* rawBuf = nullptr;
+        double rawSampleRate = 0.0;
         {
-            DBG("SamplePlayerManager::queueSampleFileSeamless - USING CACHED BUFFER");
-            queued = player->loadCachedBufferForPendingPlay(filePath, it->second->buffer,
-                                                             it->second->sampleRate, offset);
-            if (queued)
+            juce::ScopedLock sl(cacheLock);
+            auto it = sampleCache.find(filePath);
+            if (it != sampleCache.end() && it->second != nullptr)
             {
-                DBG("SamplePlayerManager: Queued seamless transition from cache for track " +
-                    juce::String(trackIndex) + " - " + filePath);
+                rawBuf       = &it->second->buffer;
+                rawSampleRate = it->second->sampleRate;
             }
         }
+        if (rawBuf != nullptr)
+        {
+            DBG("SamplePlayerManager::queueSampleFileSeamless - USING CACHED BUFFER");
+            workBuffer     = fitBufferToLoopLength(*rawBuf, rawSampleRate, loopLengthBeats, currentBpm);
+            workSampleRate = rawSampleRate;
+            loaded         = true;
+        }
     }
 
-    // Fall back to file-based pending load if not in cache
-    if (!queued)
+    if (!loaded)
     {
+        // Not in cache — read the file directly into a buffer, then resize.
         DBG("SamplePlayerManager::queueSampleFileSeamless - LOADING FROM FILE");
-        if (!player->loadFileForPendingPlay(filePath, offset))
+        juce::File file(filePath);
+        if (!file.existsAsFile())
         {
-            DBG("SamplePlayerManager: Failed to prepare pending file: " + filePath);
+            DBG("SamplePlayerManager: File not found: " + filePath);
             return;
         }
-        DBG("SamplePlayerManager: Queued seamless transition for track " + juce::String(trackIndex) +
-            " - " + filePath);
+        std::unique_ptr<juce::AudioFormatReader> reader(cacheFormatManager.createReaderFor(file));
+        if (reader == nullptr)
+        {
+            DBG("SamplePlayerManager: Could not create reader for: " + filePath);
+            return;
+        }
+        juce::AudioBuffer<float> fileBuffer((int)reader->numChannels, (int)reader->lengthInSamples);
+        reader->read(&fileBuffer, 0, (int)reader->lengthInSamples, 0, true, true);
+        workSampleRate = reader->sampleRate;
+        workBuffer     = fitBufferToLoopLength(fileBuffer, workSampleRate, loopLengthBeats, currentBpm);
+        loaded         = true;
     }
 
+    if (!loaded || workBuffer.getNumSamples() == 0)
+    {
+        DBG("SamplePlayerManager: Empty buffer for track " + juce::String(trackIndex));
+        return;
+    }
+
+    bool queued = player->loadCachedBufferForPendingPlay(filePath, workBuffer, workSampleRate, offset);
+    if (!queued)
+    {
+        DBG("SamplePlayerManager: Failed to load pending buffer for track " + juce::String(trackIndex));
+        return;
+    }
+
+    DBG("SamplePlayerManager: Queued seamless transition for track " + juce::String(trackIndex) +
+        " - " + filePath);
+
     // Set the audio-thread target so processBlock fires at the exact boundary sample.
-    // This must be done AFTER loading the pending file/buffer so the player is ready.
+    // This must be done AFTER loading the pending buffer so the player is ready.
     player->setTargetStartSample(targetStartSample);
 }
 
@@ -325,8 +380,21 @@ void SamplePlayerManager::queueStopSample(int trackIndex, int64_t targetStopSamp
     {
         player->setTargetStopSample(targetStopSample);
         player->queueStop();
-        DBG("SamplePlayerManager: Queued stop for track " + juce::String(trackIndex) +
-            " at sample " + juce::String(targetStopSample));
+        DBG("[SPM] queueStopSample T" + juce::String(trackIndex)
+            + " targetStop=" + juce::String(targetStopSample));
+
+        // Snapshot all other players so we can see if they are affected.
+        juce::ScopedLock sl(lock);
+        for (auto& pair : trackPlayers)
+        {
+            if (pair.second == nullptr) continue;
+            const int t = pair.first;
+            if (t == trackIndex) continue; // already logged above
+            DBG("[SPM]   peer T" + juce::String(t)
+                + " playing=" + juce::String(pair.second->isCurrentlyPlaying() ? 1 : 0)
+                + " queuedStop=" + juce::String(pair.second->isQueuedToStop() ? 1 : 0)
+                + " queuedPlay=" + juce::String(pair.second->isQueuedToPlay() ? 1 : 0));
+        }
     }
 }
 
@@ -336,6 +404,28 @@ void SamplePlayerManager::cancelQueuedSample(int trackIndex)
     if (player != nullptr)
     {
         player->cancelQueue();
+    }
+}
+
+void SamplePlayerManager::queueMuteSample(int trackIndex, int64_t targetSample)
+{
+    auto* player = getPlayerForTrack(trackIndex);
+    if (player != nullptr)
+    {
+        player->setTargetMuteSample(targetSample);
+        DBG("[SPM] queueMuteSample T" + juce::String(trackIndex)
+            + " target=" + juce::String(targetSample));
+    }
+}
+
+void SamplePlayerManager::queueUnmuteSample(int trackIndex, int64_t targetSample)
+{
+    auto* player = getPlayerForTrack(trackIndex);
+    if (player != nullptr)
+    {
+        player->setTargetUnmuteSample(targetSample);
+        DBG("[SPM] queueUnmuteSample T" + juce::String(trackIndex)
+            + " target=" + juce::String(targetSample));
     }
 }
 
@@ -423,11 +513,56 @@ void SamplePlayerManager::stopScene()
 //==============================================================================
 // Transport Sync
 
+juce::AudioBuffer<float> SamplePlayerManager::fitBufferToLoopLength(const juce::AudioBuffer<float>& src,
+                                                                       double srcSampleRate,
+                                                                       double loopLengthBeats,
+                                                                       double bpm)
+{
+    const int numChannels = src.getNumChannels();
+    const int srcSamples  = src.getNumSamples();
+
+    if (loopLengthBeats <= 0.0 || bpm <= 0.0 || srcSampleRate <= 0.0 || numChannels == 0)
+    {
+        // No valid loop spec — return a copy of the original buffer unchanged.
+        juce::AudioBuffer<float> copy(numChannels, srcSamples);
+        for (int ch = 0; ch < numChannels; ++ch)
+            copy.copyFrom(ch, 0, src, ch, 0, srcSamples);
+        return copy;
+    }
+
+    const int targetSamples = (int)std::round(loopLengthBeats * (60.0 / bpm) * srcSampleRate);
+
+    if (targetSamples == srcSamples)
+    {
+        juce::AudioBuffer<float> copy(numChannels, srcSamples);
+        for (int ch = 0; ch < numChannels; ++ch)
+            copy.copyFrom(ch, 0, src, ch, 0, srcSamples);
+        return copy;
+    }
+
+    juce::AudioBuffer<float> result(numChannels, targetSamples);
+    result.clear();  // zero-fill (handles padding automatically)
+
+    const int copyCount = std::min(srcSamples, targetSamples);
+    for (int ch = 0; ch < numChannels; ++ch)
+        result.copyFrom(ch, 0, src, ch, 0, copyCount);
+
+    DBG("[SPM] fitBufferToLoopLength: src=" + juce::String(srcSamples)
+        + " target=" + juce::String(targetSamples)
+        + " (" + juce::String(targetSamples < srcSamples ? "truncated" : "padded") + ")"
+        + " loopBeats=" + juce::String(loopLengthBeats, 2)
+        + " bpm=" + juce::String(bpm, 1));
+
+    return result;
+}
+
 void SamplePlayerManager::processTransportSync(double transportPositionBeats,
                                                 double bpm,
                                                 int quantizeSteps,
                                                 bool transportPlaying)
 {
+    currentBpm = bpm;
+
     juce::ScopedLock sl(lock);
 
     currentQuantizeSteps = quantizeSteps;
@@ -579,6 +714,31 @@ bool SamplePlayerManager::isSampleCached(const juce::String& filePath) const
 {
     juce::ScopedLock sl(cacheLock);
     return sampleCache.find(filePath) != sampleCache.end();
+}
+
+void SamplePlayerManager::consumeLiveEvents(const std::function<void(int, bool)>& callback)
+{
+    // No lock needed: we only read/clear atomics; the map itself is only modified on the message thread.
+    for (auto& pair : trackPlayers)
+    {
+        if (pair.second == nullptr) continue;
+        if (pair.second->consumeStartNotification())
+            callback(pair.first, true);
+        if (pair.second->consumeStopNotification())
+            callback(pair.first, false);
+    }
+}
+
+void SamplePlayerManager::consumeMuteEvents(const std::function<void(int, bool)>& callback)
+{
+    for (auto& pair : trackPlayers)
+    {
+        if (pair.second == nullptr) continue;
+        if (pair.second->consumeMuteNotification())
+            callback(pair.first, true);   // true = muted
+        if (pair.second->consumeUnmuteNotification())
+            callback(pair.first, false);  // false = unmuted
+    }
 }
 
 void SamplePlayerManager::resetAllPlayersForLiveMode(int64_t currentAudioPosition)

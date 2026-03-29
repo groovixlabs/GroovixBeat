@@ -247,7 +247,8 @@ const AppState = {
                 instrument: null,              // { pluginId, nodeId, name, state }
                 fxChain: [],                   // Array of { pluginId, nodeId, name, state, bypass }
                 midiInputDevice: '',           // MIDI input device name ('' = none)
-                midiInputChannel: 0            // 0 = all channels, 1-16 = specific channel
+                midiInputChannel: 0,           // 0 = all channels, 1-16 = specific channel
+                useCMajorMapping: false        // Remap C Major input to this track's scale/root
             };
         }
         return this.trackSettings[trackIndex];
@@ -277,6 +278,9 @@ const AppState = {
         }
         if (settings.midiInputChannel === undefined) {
             settings.midiInputChannel = 0;
+        }
+        if (settings.useCMajorMapping === undefined) {
+            settings.useCMajorMapping = false;
         }
         // Compute isDrumTrack for backwards compatibility
         settings.isDrumTrack = settings.isPercussion;
@@ -699,7 +703,8 @@ const AppState = {
             samplerInstrument: settings.samplerInstrument || null,
             fxChain: settings.fxChain || [],
             midiInputDevice: settings.midiInputDevice || '',
-            midiInputChannel: settings.midiInputChannel || 0
+            midiInputChannel: settings.midiInputChannel || 0,
+            useCMajorMapping: settings.useCMajorMapping || false
         }));
 
         // Get track scales from ClipEditor
@@ -895,7 +900,8 @@ const AppState = {
                         samplerInstrument: data.trackSettings[t].samplerInstrument || null,
                         fxChain: data.trackSettings[t].fxChain || [],
                         midiInputDevice: data.trackSettings[t].midiInputDevice || '',
-                        midiInputChannel: data.trackSettings[t].midiInputChannel || 0
+                        midiInputChannel: data.trackSettings[t].midiInputChannel || 0,
+                        useCMajorMapping: data.trackSettings[t].useCMajorMapping || false
                     };
                 } else {
                     this.initTrackSettings(t);

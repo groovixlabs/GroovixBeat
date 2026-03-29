@@ -123,6 +123,14 @@ public:
     void stopSongMode();
 
     /**
+     * C++-driven song playback: JS hands ALL scene data at once.
+     * C++ starts scene 0, sequences all transitions internally, and fires
+     * songSceneChangedCallback for each scene change (JS updates UI only).
+     * scenesArray: [{sceneIndex, midiClips[], sampleFiles[], durationBeats}]
+     */
+    void startSong(const juce::var& scenesArray);
+
+    /**
      * Register a callback that fires on the message thread when a scene advance
      * completes.  sceneIndex = new scene index, or -1 when the song ends.
      */
@@ -223,6 +231,22 @@ private:
 
     std::vector<SongSampleClip> nextSceneSamples;
     juce::var nextSceneMidiClipsVar;
+
+    // ---- C++-driven song sequencing ----------------------------------------
+    // When JS calls startSong() it hands all scene data at once.  C++ then owns
+    // scene transitions entirely — no JS round-trip is needed per transition.
+    struct SongSceneData
+    {
+        int sceneIndex = 0;
+        juce::var midiClipsVar;
+        std::vector<SongSampleClip> sampleClips;
+        double durationBeats = 4.0;
+    };
+
+    std::vector<SongSceneData> songSceneQueue;
+    int currentSongQueueIndex = -1;
+
+    void loadNextSceneFromQueue();   // populate nextScene* and preload files from queue
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MidiBridge)
 };

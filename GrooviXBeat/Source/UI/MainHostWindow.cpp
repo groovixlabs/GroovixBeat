@@ -507,21 +507,34 @@ void MainHostWindow::tryToQuitApplication()
        #else
         SafePointer<MainHostWindow> parent { this };
 
-        graphHolder->saveSequencerState();
+        // Ask the user whether to save before quitting.
+        auto* dialog = new AlertWindow ("Exit GrooviXBeat",
+                                        "Do you want to save your project before exiting?",
+                                        AlertWindow::QuestionIcon);
 
-        // This saves the current filtergraph.
-        /*
-            graphHolder->graph->saveIfNeededAndUserAgreesAsync ([parent, releaseAndQuit] (FileBasedDocument::SaveResult r)
+        dialog->addButton ("Save & Exit",        1, KeyPress (KeyPress::returnKey));
+        dialog->addButton ("Exit without Saving", 2);
+        dialog->addButton ("Cancel",             0, KeyPress (KeyPress::escapeKey));
+
+        dialog->enterModalState (true, ModalCallbackFunction::create (
+            [parent, releaseAndQuit] (int result)
             {
                 if (parent == nullptr)
                     return;
 
-                if (r == FileBasedDocument::savedOk)
+                if (result == 1)
+                {
+                    // Save then quit
+                    parent->graphHolder->saveSequencerState();
                     releaseAndQuit();
-            });
-        */
-
-        releaseAndQuit();
+                }
+                else if (result == 2)
+                {
+                    // Quit without saving
+                    releaseAndQuit();
+                }
+                // result == 0 (Cancel): do nothing, stay open
+            }), true);
        #endif
 
         return;

@@ -2793,6 +2793,7 @@ const ClipEditor = {
         const midiInputRow = document.getElementById('midiInputRow');
         const midiInputDeviceSelect = document.getElementById('midiInputDeviceSelect');
         const midiInputChannelSelect = document.getElementById('midiInputChannelSelect');
+        const useCMajorCheckbox = document.getElementById('useCMajorCheckbox');
 
         if (!modal) return;
 
@@ -2858,6 +2859,7 @@ const ClipEditor = {
                     AudioBridge.populateMidiInputDevices(midiInputDeviceSelect, trackSettings.midiInputDevice);
                 }
                 midiInputChannelSelect.value = trackSettings.midiInputChannel || 0;
+                if (useCMajorCheckbox) useCMajorCheckbox.checked = !!trackSettings.useCMajorMapping;
             }
         }
 
@@ -3052,6 +3054,7 @@ const ClipEditor = {
 
         const midiInputDeviceSelect = document.getElementById('midiInputDeviceSelect');
         const midiInputChannelSelect = document.getElementById('midiInputChannelSelect');
+        const useCMajorCheckboxSave = document.getElementById('useCMajorCheckbox');
 
         // Build track settings update
         const settingsUpdate = {
@@ -3061,7 +3064,8 @@ const ClipEditor = {
             midiChannel: parseInt(channelSelect.value, 10),
             midiProgram: parseInt(instrumentSelect.value, 10),
             midiInputDevice: (trackMode !== 'sample' && midiInputDeviceSelect) ? midiInputDeviceSelect.value : '',
-            midiInputChannel: (trackMode !== 'sample' && midiInputChannelSelect) ? parseInt(midiInputChannelSelect.value, 10) : 0
+            midiInputChannel: (trackMode !== 'sample' && midiInputChannelSelect) ? parseInt(midiInputChannelSelect.value, 10) : 0,
+            useCMajorMapping: (trackMode !== 'sample' && useCMajorCheckboxSave) ? useCMajorCheckboxSave.checked : false
         };
 
         // If switching to sample type, tell JUCE to remove any VST/sampler/drum node
@@ -3122,6 +3126,20 @@ const ClipEditor = {
             const scale = scaleTypeSelect.value;
             const hideNotes = hideNotesCheckbox.checked;
             this.setTrackScale(this.trackSettingsTrackIndex, root, scale, hideNotes);
+        }
+
+        // Send C Major → scale mapping config to JUCE so live VST notes are also remapped.
+        // Sent for all track types so JUCE always has up-to-date state.
+        if (typeof AudioBridge !== 'undefined') {
+            const tIdx = this.trackSettingsTrackIndex;
+            const scaleSettings = this.getTrackScale(tIdx);
+            const scaleData = (scaleSettings.scale !== 'none') ? (this.SCALES[scaleSettings.scale] || null) : null;
+            AudioBridge.send('setTrackMidiMapping', {
+                trackIndex:       tIdx,
+                useCMajorMapping: settingsUpdate.useCMajorMapping,
+                scaleRoot:        scaleSettings.root,
+                scaleIntervals:   scaleData ? scaleData.intervals : []
+            });
         }
 
         const trackSettings = AppState.getTrackSettings(this.trackSettingsTrackIndex);

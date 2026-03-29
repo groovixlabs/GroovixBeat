@@ -1141,6 +1141,10 @@ SequencerComponent::SequencerComponent (GraphDocumentComponent& graphDoc, Plugin
         evaluateJavaScript(js);
     });
 
+    // Register our play head with the AudioProcessorGraph so all VST instruments
+    // can query the current tempo and transport state via AudioPlayHead::getPosition().
+    pluginGraph.graph.setPlayHead(&groovixPlayHead);
+
     // Connect MidiTrackOutputManager to MidiBridge
     midiBridge.setMidiTrackOutputManager(&midiTrackOutputManager);
     DBG("SequencerComponent - setMidiTrackOutputManager done, ptr: " +
@@ -1296,8 +1300,20 @@ SequencerComponent::~SequencerComponent()
     // Remove all MIDI input device callbacks
     {
         juce::ScopedLock lock(midiInputRouteLock);
+        auto& dm = graphDocument.getDeviceManager();
         for (const auto& [trackIndex, route] : midiInputRoutes)
-            graphDocument.getDeviceManager().removeMidiInputDeviceCallback(route.deviceIdentifier, this);
+        {
+            if (route.anyDevice)
+            {
+                // Unregister from every physical device
+                for (const auto& d : juce::MidiInput::getAvailableDevices())
+                    dm.removeMidiInputDeviceCallback(d.identifier, this);
+            }
+            else
+            {
+                dm.removeMidiInputDeviceCallback(route.deviceIdentifier, this);
+            }
+        }
         midiInputRoutes.clear();
     }
 
@@ -1321,6 +1337,10 @@ void SequencerComponent::timerCallback()
     {
         double position = midiBridge.getPlayheadPosition();
         bool isPlaying = midiBridge.isPlaying();
+
+        // Keep the VST play head in sync (~60 fps is fine; VSTs cache the value per block)
+        groovixPlayHead.setIsPlaying  (isPlaying);
+        groovixPlayHead.setPpqPosition(midiBridge.getPlayheadPositionBeats());
 
         //if (isPlaying)
         {
@@ -1584,6 +1604,7 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
     {
         double bpm = payload.getProperty("bpm", 120.0);
         midiBridge.setTempo(bpm);
+        groovixPlayHead.setTempo(bpm);  // Keep play head in sync for VST BPM queries
     }
     else if (command == "playClip" || command == "playScene" || command == "playSong" ||
         command == "play" || command == "transportPlay")
@@ -1991,6 +2012,32 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
     }
     // -------------------------------------------------------------------------
     // Song Mode commands - C++ drives scene timing, JS supplies data + updates UI
+    else if (command == "startSong")
+    {
+        // JS hands all scene data upfront; C++ owns scene sequencing from here.
+        if (samplePlayerNodes.empty())
+            setupSamplePlayersForTracks(8);
+
+        juce::var scenes = payload.getProperty("scenes", juce::var());
+        DBG("startSong: " + juce::String(scenes.isArray() ? scenes.size() : 0) + " scene(s)");
+
+        // Tell JS loading has started so it can show the spinner
+        if (webBrowser)
+            webBrowser->emitEventIfBrowserIsVisible("juceBridgeEvents",
+                "{\"type\":\"songLoading\"}");
+
+        midiBridge.startSong(scenes);
+
+        // Transport is now rolling — tell JS to start the playhead animation
+        int firstSceneIndex = (scenes.isArray() && scenes.size() > 0)
+            ? (int)scenes[0].getProperty("sceneIndex", 0) : 0;
+        if (webBrowser)
+        {
+            juce::String json = "{\"type\":\"songReady\",\"sceneIndex\":"
+                                + juce::String(firstSceneIndex) + "}";
+            webBrowser->emitEventIfBrowserIsVisible("juceBridgeEvents", json);
+        }
+    }
     else if (command == "setSongSceneDuration")
     {
         double beats = payload.getProperty("beats", 0.0);
@@ -2079,6 +2126,31 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
             evaluateJavaScript("if (typeof SongScreen !== 'undefined' && SongScreen.onSamplesPreloaded) { SongScreen.onSamplesPreloaded(); }");
         }
     }
+    else if (command == "preloadSamplesForSong")
+    {
+        // Additively cache sample files for Song Mode — no cache clear or player reset,
+        // so currently-playing samples are not disturbed. Called while the current scene
+        // is still playing so the next scene's files are warm in cache by transition time.
+        auto pathsVar = payload.getProperty("paths", juce::var());
+        if (pathsVar.isArray())
+        {
+            if (samplePlayerNodes.empty())
+                setupSamplePlayersForTracks(8);
+
+            if (auto* manager = midiBridge.getSamplePlayerManager())
+            {
+                juce::StringArray paths;
+                for (int i = 0; i < pathsVar.size(); ++i)
+                {
+                    juce::String p = pathsVar[i].toString();
+                    if (p.isNotEmpty())
+                        paths.add(p);
+                }
+                DBG("preloadSamplesForSong: caching " + juce::String(paths.size()) + " file(s)");
+                manager->preloadSamplesForLiveMode(paths);  // additive, skips already-cached files
+            }
+        }
+    }
     else if (command == "clearSampleCache")
     {
         // Clear sample cache (when exiting Live Mode or to free memory)
@@ -2093,6 +2165,7 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
         // Receive initial project state from sequencer
         double tempo = payload.getProperty("tempo", 120.0);
         midiBridge.setTempo(tempo);
+        groovixPlayHead.setTempo(tempo);  // Keep play head in sync for VST BPM queries
         DBG("Synced project state: tempo = " + juce::String(tempo));
 
         // Process mixer states
@@ -2900,6 +2973,35 @@ void SequencerComponent::handleAudioBridgeMessage(const juce::var& message)
             + " enabled=" + juce::String(enabled ? "true" : "false"));
 
         setMidiInputRoute(trackIndex, device, channel, enabled);
+    }
+    else if (command == "setTrackMidiMapping")
+    {
+        // Store the C Major → target scale remapping config for a track.
+        // Applied in handleIncomingMidiMessage so live VST notes are remapped too.
+        int trackIndex       = payload.getProperty("trackIndex", 0);
+        bool useCMajor       = static_cast<bool>(payload.getProperty("useCMajorMapping", false));
+        int  scaleRoot        = payload.getProperty("scaleRoot", 0);
+        juce::var intervalsVar = payload.getProperty("scaleIntervals", juce::var());
+
+        TrackMidiMapping mapping;
+        mapping.useCMajorMapping = useCMajor;
+        mapping.scaleRoot        = scaleRoot;
+
+        if (intervalsVar.isArray())
+        {
+            for (int i = 0; i < intervalsVar.size(); ++i)
+                mapping.scaleIntervals.push_back(static_cast<int>(intervalsVar[i]));
+        }
+
+        {
+            juce::ScopedLock lock(midiInputRouteLock);
+            trackMidiMappings[trackIndex] = std::move(mapping);
+        }
+
+        DBG("setTrackMidiMapping: track=" + juce::String(trackIndex)
+            + " useCMajor=" + juce::String(useCMajor ? "true" : "false")
+            + " root=" + juce::String(scaleRoot)
+            + " intervals=" + juce::String(mapping.scaleIntervals.size()));
     }
     else
     {
@@ -4669,51 +4771,123 @@ void SequencerComponent::updateSoloStates()
 void SequencerComponent::setMidiInputRoute(int trackIndex, const juce::String& deviceName, int channel, bool enabled)
 {
     auto& dm = graphDocument.getDeviceManager();
-
-    // Resolve device name to identifier
-    juce::String deviceId;
-    for (const auto& d : juce::MidiInput::getAvailableDevices())
-    {
-        if (d.name == deviceName)
-        {
-            deviceId = d.identifier;
-            break;
-        }
-    }
+    const bool isAny = (deviceName == "__any__");
+    const auto allDevices = juce::MidiInput::getAvailableDevices();
 
     juce::ScopedLock lock(midiInputRouteLock);
 
+    // Remove the existing route for this track and unregister callbacks it owned
     auto it = midiInputRoutes.find(trackIndex);
     if (it != midiInputRoutes.end())
     {
-        // Check if any other track still needs the old device
-        const juce::String& oldId = it->second.deviceIdentifier;
-        bool oldDeviceStillNeeded = false;
-        for (const auto& [t, route] : midiInputRoutes)
-            if (t != trackIndex && route.deviceIdentifier == oldId)
-                oldDeviceStillNeeded = true;
-
-        if (!oldDeviceStillNeeded && oldId.isNotEmpty())
-            dm.removeMidiInputDeviceCallback(oldId, this);
-
+        if (it->second.anyDevice)
+        {
+            // Was "Any" — unregister from every device not still needed by another route
+            for (const auto& d : allDevices)
+            {
+                bool stillNeeded = false;
+                for (const auto& [t, route] : midiInputRoutes)
+                    if (t != trackIndex && (route.anyDevice || route.deviceIdentifier == d.identifier))
+                        { stillNeeded = true; break; }
+                if (!stillNeeded)
+                    dm.removeMidiInputDeviceCallback(d.identifier, this);
+            }
+        }
+        else
+        {
+            // Was a specific device — unregister if nothing else (specific or "any") needs it
+            const juce::String& oldId = it->second.deviceIdentifier;
+            bool stillNeeded = false;
+            for (const auto& [t, route] : midiInputRoutes)
+                if (t != trackIndex && (route.anyDevice || route.deviceIdentifier == oldId))
+                    { stillNeeded = true; break; }
+            if (!stillNeeded && oldId.isNotEmpty())
+                dm.removeMidiInputDeviceCallback(oldId, this);
+        }
         midiInputRoutes.erase(it);
     }
 
-    if (enabled && deviceId.isNotEmpty())
-    {
-        midiInputRoutes[trackIndex] = { deviceId, channel };
+    if (!enabled)
+        return;
 
-        // Register our callback for this device (safe to call even if already registered)
-        dm.addMidiInputDeviceCallback(deviceId, this);
+    if (isAny)
+    {
+        // Register for every currently enabled MIDI device
+        for (const auto& d : allDevices)
+            if (dm.isMidiInputDeviceEnabled(d.identifier))
+                dm.addMidiInputDeviceCallback(d.identifier, this);
+
+        MidiInputRoute route;
+        route.deviceIdentifier = "__any__";
+        route.channel          = channel;
+        route.anyDevice        = true;
+        midiInputRoutes[trackIndex] = std::move(route);
 
         DBG("setMidiInputRoute: track=" + juce::String(trackIndex)
-            + " device=" + deviceName + " [" + deviceId + "]"
-            + " channel=" + juce::String(channel));
+            + " device=ANY channel=" + juce::String(channel));
     }
-    else if (enabled)
+    else
     {
-        DBG("setMidiInputRoute: device not found: " + deviceName);
+        // Resolve device name to identifier
+        juce::String deviceId;
+        for (const auto& d : allDevices)
+            if (d.name == deviceName) { deviceId = d.identifier; break; }
+
+        if (deviceId.isNotEmpty())
+        {
+            MidiInputRoute route;
+            route.deviceIdentifier = deviceId;
+            route.channel          = channel;
+            route.anyDevice        = false;
+            midiInputRoutes[trackIndex] = std::move(route);
+
+            dm.addMidiInputDeviceCallback(deviceId, this);
+
+            DBG("setMidiInputRoute: track=" + juce::String(trackIndex)
+                + " device=" + deviceName + " [" + deviceId + "]"
+                + " channel=" + juce::String(channel));
+        }
+        else
+        {
+            DBG("setMidiInputRoute: device not found: " + deviceName);
+        }
     }
+}
+
+int SequencerComponent::remapCMajorPitch(int pitch, const TrackMidiMapping& mapping)
+{
+    if (!mapping.useCMajorMapping || mapping.scaleIntervals.empty())
+        return pitch;
+
+    static const int CM[7] = { 0, 2, 4, 5, 7, 9, 11 }; // C Major semitone offsets
+
+    const int octave    = pitch / 12;
+    const int noteInOct = pitch % 12;
+
+    // Find the C Major degree (0-6); snap black keys to the nearest white key
+    int degree = -1;
+    for (int i = 0; i < 7; ++i)
+        if (CM[i] == noteInOct) { degree = i; break; }
+
+    if (degree == -1)
+    {
+        int minDist = 100;
+        for (int i = 0; i < 7; ++i)
+        {
+            int d0 = std::abs(noteInOct - CM[i]);
+            int d1 = std::abs(noteInOct - CM[i] + 12);
+            int d2 = std::abs(noteInOct - CM[i] - 12);
+            int dist = d0 < d1 ? (d0 < d2 ? d0 : d2) : (d1 < d2 ? d1 : d2);
+            if (dist < minDist) { minDist = dist; degree = i; }
+        }
+    }
+
+    // Map that degree to the same degree in the target scale
+    const int numDegrees = static_cast<int>(mapping.scaleIntervals.size());
+    const int degIdx     = degree % numDegrees;
+    const int octShift   = degree / numDegrees;
+    const int mapped     = (octave + octShift) * 12 + mapping.scaleRoot + mapping.scaleIntervals[degIdx];
+    return juce::jlimit(0, 127, mapped);
 }
 
 void SequencerComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
@@ -4723,36 +4897,115 @@ void SequencerComponent::handleIncomingMidiMessage(juce::MidiInput* source, cons
 
     for (const auto& [trackIndex, route] : midiInputRoutes)
     {
-        if (source->getIdentifier() != route.deviceIdentifier)
+        // For "Any" routes accept all devices; otherwise match the specific device
+        if (!route.anyDevice && source->getIdentifier() != route.deviceIdentifier)
             continue;
 
         // Apply channel filter (0 = all channels)
         if (route.channel != 0 && message.getChannel() != route.channel)
             continue;
 
-        // Route ALL MIDI messages directly to the track's VST instrument.
-        // This covers notes, CC, pitch bend, aftertouch, program change, etc.
-        midiTrackOutputManager.sendMidiToTrack(trackIndex, message);
+        // Look up the C Major → scale remapping config for this track (protected by midiInputRouteLock)
+        auto mappingIt = trackMidiMappings.find(trackIndex);
+        const bool hasMidiMapping = (mappingIt != trackMidiMappings.end())
+                                    && mappingIt->second.useCMajorMapping
+                                    && !mappingIt->second.scaleIntervals.empty();
 
-        // Forward note-on / note-off to JS for recording and visualization only
+        // For note-on/off, apply scale remapping if configured, then route to VST.
+        // All other message types (CC, pitch bend, etc.) pass through unchanged.
         if (message.isNoteOn() || message.isNoteOff())
         {
-            const int pitch     = message.getNoteNumber();
+            const int origPitch = message.getNoteNumber();
             const int velocity  = message.getVelocity();
             const bool isNoteOn = message.isNoteOn();
-            const int ti        = trackIndex;
-            auto* browser       = webBrowser.get();
 
+            // Determine the mapped pitch (note-off must use the same pitch as its note-on)
+            int mappedPitch = origPitch;
+            if (hasMidiMapping)
+            {
+                auto& routeMut = midiInputRoutes.at(trackIndex);
+                if (isNoteOn)
+                {
+                    mappedPitch = remapCMajorPitch(origPitch, mappingIt->second);
+                    routeMut.activeMappedNotes[origPitch] = mappedPitch;
+                }
+                else
+                {
+                    // Note-off: use the pitch stored at note-on time so it pairs correctly
+                    auto noteIt = routeMut.activeMappedNotes.find(origPitch);
+                    if (noteIt != routeMut.activeMappedNotes.end())
+                    {
+                        mappedPitch = noteIt->second;
+                        routeMut.activeMappedNotes.erase(noteIt);
+                    }
+                }
+            }
+
+            // Build (potentially remapped) MIDI message and route it to the VST
+            juce::MidiMessage outMsg = isNoteOn
+                ? juce::MidiMessage::noteOn (message.getChannel(), mappedPitch, static_cast<uint8>(velocity))
+                : juce::MidiMessage::noteOff(message.getChannel(), mappedPitch, static_cast<uint8>(velocity));
+            midiTrackOutputManager.sendMidiToTrack(trackIndex, outMsg);
+
+            // Forward to JS for recording — send the original pitch so JS can do its own mapping
+            const int ti = trackIndex;
+            auto* browser = webBrowser.get();
             if (browser != nullptr)
             {
-                juce::MessageManager::callAsync([browser, ti, pitch, velocity, isNoteOn]()
+                juce::MessageManager::callAsync([browser, ti, origPitch, velocity, isNoteOn]()
                 {
                     juce::String jsonEvent =
                         "{\"type\": \"midiNoteIn\","
                         " \"trackIndex\": " + juce::String(ti) + ","
-                        " \"pitch\": "      + juce::String(pitch) + ","
+                        " \"pitch\": "      + juce::String(origPitch) + ","
                         " \"velocity\": "   + juce::String(velocity) + ","
                         " \"isNoteOn\": "   + juce::String(isNoteOn ? "true" : "false") + "}";
+                    browser->emitEventIfBrowserIsVisible("juceBridgeEvents", jsonEvent);
+                });
+            }
+        }
+        else
+        {
+            // Non-note messages (CC, pitch bend, aftertouch, etc.) — pass through unchanged
+            midiTrackOutputManager.sendMidiToTrack(trackIndex, message);
+        }
+
+        // Forward pitch bend to JS (for recording: map 0-16383 → 0-127, 8192=center→64)
+        if (message.isPitchWheel())
+        {
+            const int ti    = trackIndex;
+            const int value = juce::jlimit(0, 127, message.getPitchWheelValue() / 128);
+            auto* browser   = webBrowser.get();
+
+            if (browser != nullptr)
+            {
+                juce::MessageManager::callAsync([browser, ti, value]()
+                {
+                    juce::String jsonEvent =
+                        "{\"type\": \"midiPitchBendIn\","
+                        " \"trackIndex\": " + juce::String(ti) + ","
+                        " \"value\": "      + juce::String(value) + "}";
+                    browser->emitEventIfBrowserIsVisible("juceBridgeEvents", jsonEvent);
+                });
+            }
+        }
+
+        // Forward CC#1 (modulation wheel) to JS for recording
+        if (message.isController() && message.getControllerNumber() == 1)
+        {
+            const int ti    = trackIndex;
+            const int value = message.getControllerValue(); // already 0-127
+            auto* browser   = webBrowser.get();
+
+            if (browser != nullptr)
+            {
+                juce::MessageManager::callAsync([browser, ti, value]()
+                {
+                    juce::String jsonEvent =
+                        "{\"type\": \"midiCCIn\","
+                        " \"trackIndex\": " + juce::String(ti) + ","
+                        " \"cc\": 1,"
+                        " \"value\": "      + juce::String(value) + "}";
                     browser->emitEventIfBrowserIsVisible("juceBridgeEvents", jsonEvent);
                 });
             }

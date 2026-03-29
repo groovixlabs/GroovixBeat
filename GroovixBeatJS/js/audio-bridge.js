@@ -310,12 +310,15 @@ const AudioBridge = {
     // MIDI input connect/record state
     midiConnectedTracks: {},      // trackIndex -> true if MIDI input is connected
     midiRecordingTrack: null,     // trackIndex being recorded, or null
-    _pendingRecordNotes: {},      // pitch -> { start: step, velocity } for active note-ons
+    _pendingRecordNotes: {},      // pitch -> { start: step, velocity, pitchBend, modulation } for active note-ons
     _midiDeviceList: null,        // cached list of MIDI input device names from JUCE
 
     // Record head - wall-clock-based position counter (independent of JUCE playback)
-    _recordStartTime: null,       // performance.now() when recording started
+    _recordStartTime: null,       // performance.now() when first note-on fires (null = waiting for first note)
     _recordHeadStep: 0,           // current record position in steps
+    _recordWaitingForFirstNote: false, // true after pressing record, before the first note-on arrives
+    _recordCurrentPitchBend: 64,  // current incoming pitch bend value (0-127, 64=center)
+    _recordCurrentModulation: 0,  // current incoming modulation CC1 value (0-127)
 
     // Live mode state
     liveMode: false,
@@ -392,19 +395,26 @@ const AudioBridge = {
         }
     },
 
-    updateSongPlayButton: function(playing, paused) {
+    updateSongPlayButton: function(playing, paused, loading) {
         const playBtn = document.getElementById('playBtn');
         if (!playBtn) return;
 
         const svg = playBtn.querySelector('svg');
         if (!svg) return;
 
-        if (playing && !paused) {
+        if (loading) {
+            // Spinning ring to indicate sample pre-loading
+            svg.innerHTML = '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="16 34" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite"/></circle>';
+            playBtn.classList.remove('playing');
+            playBtn.classList.add('loading');
+        } else if (playing && !paused) {
             svg.innerHTML = '<rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/>';
             playBtn.classList.add('playing');
+            playBtn.classList.remove('loading');
         } else {
             svg.innerHTML = '<polygon points="5,3 19,12 5,21"/>';
             playBtn.classList.toggle('playing', playing && paused);
+            playBtn.classList.remove('loading');
         }
     },
 
@@ -1769,31 +1779,37 @@ const AudioBridge = {
         this.songPaused = false;
         this.updateSongPlayButton(true, false);
 
-        // Find first scene with content
-        const firstScene = this._findNextSongScene(0);
-        if (firstScene < 0) {
+        // Collect ALL non-empty scenes upfront
+        const scenes = [];
+        for (let s = 0; s < AppState.numScenes; s++) {
+            const data = this._buildSongSceneData(s);
+            if (data) scenes.push(data);
+        }
+
+        if (scenes.length === 0) {
             this._stopSong(timestamp);
             return;
         }
 
-        this.currentSongScene = firstScene;
+        const firstSceneIndex = scenes[0].sceneIndex;
+        this.currentSongScene = firstSceneIndex;
+        this.playingSceneIndex = firstSceneIndex;
+        this.sceneLength = 0;          // C++ drives all scene boundaries
 
-        // Start scene (sends stopScene, clearAllClips, scheduleClip, playSampleFile, playScene)
-        this._startScene(firstScene, 0, timestamp, false, false);
-        this.isPlayingSong = true;
-        // _startScene sets sceneLength for JS-side end detection, but in song mode
-        // C++ drives scene transitions — disable the JS check to prevent premature stopScene()
-        this.sceneLength = 0;
+        // Show loading spinner — C++ will emit songReady when all samples are loaded
+        // and transport has started, at which point we start the playhead animation.
+        this.updateSongPlayButton(false, false, true);
+        if (typeof SongScreen !== 'undefined')
+            SongScreen.highlightPlayingScene(firstSceneIndex);
 
-        // Tell C++ how long this scene lasts so it can detect the boundary
-        const durationBeats = this._calcSongSceneDurationBeats(firstScene);
-        this.send('setSongSceneDuration', { beats: durationBeats });
+        // Prepare audio graph and tempo before handing off to C++
+        this._ensureSamplerInstrumentsLoaded();
+        this._ensureGraphWired();
+        this.send('setTempo', { bpm: AppState.tempo || 120 });
 
-        // Pre-queue the next scene so C++ can transition instantly
-        this._preQueueNextSongScene(firstScene + 1);
-
-        // Kick off playhead animation in looping mode
-        this._startSongPlayheadAnimation(firstScene);
+        // Hand ALL scene data to C++ — it preloads all samples, starts scene 0,
+        // and will emit songReady when the transport is rolling.
+        this.send('startSong', { scenes });
     },
 
     /**
@@ -1827,6 +1843,61 @@ const AudioBridge = {
         }
 
         return (maxSteps * sceneRepeat) / 4.0;  // steps → beats
+    },
+
+    /**
+     * Build the payload for one scene to be sent inside startSong.
+     * Returns null if the scene has no playable content.
+     */
+    _buildSongSceneData(sceneIndex) {
+        const midiClips = [];
+        const sampleFiles = [];
+
+        for (let track = 0; track < AppState.numTracks; track++) {
+            const clip = AppState.getClip(sceneIndex, track);
+            const trackSettings = AppState.getTrackSettings(track);
+            const mixerState = AppState.getMixerState(track);
+            if (mixerState.mute || clip.mute) continue;
+
+            if (trackSettings.trackType === 'sample') {
+                if (typeof SampleEditor !== 'undefined') {
+                    const trackSample = SampleEditor.getClipSample(sceneIndex, track);
+                    if (trackSample && (trackSample.fullPath || trackSample.fileName)) {
+                        const filePath = trackSample.fullPath || trackSample.filePath || trackSample.fileName;
+                        sampleFiles.push({
+                            trackIndex: track,
+                            filePath,
+                            offset: trackSample.offset || 0,
+                            loop: (clip.playMode || 'loop') === 'loop',
+                            loopLengthBeats: (clip.length || 64) / 4.0
+                        });
+                    }
+                }
+            } else if (clip.notes && clip.notes.length > 0) {
+                const clipLength = clip.length || AppState.currentLength;
+                const notesToSchedule = clip.notes
+                    .filter(n => n.start < clipLength)
+                    .map(n => ({
+                        ...n,
+                        duration: Math.min(n.duration, clipLength - n.start)
+                    }));
+                midiClips.push({
+                    trackIndex: track,
+                    notes: notesToSchedule,
+                    loopLength: clipLength,
+                    loop: (clip.playMode || 'loop') === 'loop',
+                    program: trackSettings.midiProgram || 0,
+                    isDrum: trackSettings.isPercussion || false
+                });
+            }
+        }
+
+        if (midiClips.length === 0 && sampleFiles.length === 0) return null;
+
+        const durationBeats = this._calcSongSceneDurationBeats(sceneIndex);
+        if (durationBeats <= 0) return null;
+
+        return { sceneIndex, midiClips, sampleFiles, durationBeats };
     },
 
     /**
@@ -1979,15 +2050,28 @@ const AudioBridge = {
         this.songPaused = false;
         this.updateSongPlayButton(true, false);
 
-        const sceneIndex = this.currentSongScene || 0;
-        this._startScene(sceneIndex, 0, timestamp, false, false);
-        this.isPlayingSong = true;
-        this.sceneLength = 0;  // C++ drives scene end in song mode
+        const startScene = this.currentSongScene || 0;
 
-        const durationBeats = this._calcSongSceneDurationBeats(sceneIndex);
-        this.send('setSongSceneDuration', { beats: durationBeats });
-        this._preQueueNextSongScene(sceneIndex + 1);
-        this._startSongPlayheadAnimation(sceneIndex);
+        // Collect scenes from the current scene onwards and re-hand to C++
+        const scenes = [];
+        for (let s = startScene; s < AppState.numScenes; s++) {
+            const data = this._buildSongSceneData(s);
+            if (data) scenes.push(data);
+        }
+
+        if (scenes.length === 0) {
+            this._stopSong(timestamp);
+            return;
+        }
+
+        this.updateSongPlayButton(false, false, true);  // loading spinner
+        this._ensureGraphWired();
+        this.send('setTempo', { bpm: AppState.tempo || 120 });
+        this.send('startSong', { scenes });
+
+        this.isPlayingSong = true;
+        this.sceneLength = 0;
+        // Playhead animation starts when C++ emits songReady
     },
 
     // ==========================================
@@ -2439,8 +2523,9 @@ const AudioBridge = {
                 this._pendingDeviceSelect = null;
                 this._pendingDeviceValue = null;
                 if (pendingSel) {
-                    // Repopulate directly (cache is now set, won't re-request)
-                    while (pendingSel.options.length > 1) pendingSel.remove(1);
+                    // Repopulate directly (cache is now set, won't re-request).
+                    // Preserve fixed options at index 0 ("None") and index 1 ("Any").
+                    while (pendingSel.options.length > 2) pendingSel.remove(2);
                     this._midiDeviceList.forEach(name => {
                         const opt = document.createElement('option');
                         opt.value = name;
@@ -2466,10 +2551,25 @@ const AudioBridge = {
                 if (!clip) break;
 
                 if (isNoteOn) {
-                    // Stamp note-on with current record head position (float, for accuracy)
+                    // If this is the first note after pressing record, start the clock now
+                    if (this._recordWaitingForFirstNote) {
+                        this._recordStartTime = performance.now();
+                        this._recordWaitingForFirstNote = false;
+                    }
+
+                    // Apply C Major → target scale mapping if the track setting is enabled
+                    const trackSettings = (typeof AppState !== 'undefined') ? AppState.getTrackSettings(trackIndex) : {};
+                    const mappedPitch = trackSettings.useCMajorMapping
+                        ? this._mapCMajorToScale(pitch, trackIndex)
+                        : pitch;
+
+                    // Stamp note-on with current record head position and capture CC state
                     this._pendingRecordNotes[pitch] = {
                         start: this._getRecordHeadStep(),
-                        velocity: velocity / 127
+                        velocity: velocity,                          // 0-127 (matches automation bar scale)
+                        pitchBend: this._recordCurrentPitchBend,   // 0-127 snapshot at note-on
+                        modulation: this._recordCurrentModulation,  // 0-127 snapshot at note-on
+                        mappedPitch: mappedPitch                    // resolved target pitch
                     };
                 } else {
                     // Note-off: compute duration from record head and write to clip
@@ -2478,7 +2578,11 @@ const AudioBridge = {
                         const endStep = this._getRecordHeadStep();
                         const startSnapped = Math.round(info.start);
                         const duration = Math.max(1, Math.round(endStep - info.start));
-                        clip.notes.push({ pitch: pitch, start: startSnapped, duration: duration, velocity: info.velocity });
+                        const note = { pitch: info.mappedPitch, start: startSnapped, duration: duration, velocity: info.velocity };
+                        // Only store CC overrides when they differ from the defaults
+                        if (info.pitchBend !== 64) note.pitchBend = info.pitchBend;
+                        if (info.modulation !== 0)  note.modulation = info.modulation;
+                        clip.notes.push(note);
                         delete this._pendingRecordNotes[pitch];
 
                         if (typeof ClipEditor !== 'undefined' && ClipEditor.gridCtx &&
@@ -2490,6 +2594,51 @@ const AudioBridge = {
                         }
                     }
                 }
+                break;
+            }
+
+            case 'midiPitchBendIn': {
+                // JUCE forwards an incoming pitch bend event; track current value for recording
+                if (this.midiRecordingTrack === message.trackIndex) {
+                    this._recordCurrentPitchBend = message.value; // 0-127, 64=center
+                }
+                break;
+            }
+
+            case 'midiCCIn': {
+                // JUCE forwards an incoming CC event; track CC#1 (modulation) for recording
+                if (this.midiRecordingTrack === message.trackIndex && message.cc === 1) {
+                    this._recordCurrentModulation = message.value; // 0-127
+                }
+                break;
+            }
+
+            case 'songLoading': {
+                // C++ has started loading all scene samples — keep the spinner visible.
+                // (Usually the spinner is already showing from _playSong; this ensures
+                // it is shown even if the message arrives slightly late.)
+                this.updateSongPlayButton(false, false, true);
+                break;
+            }
+
+            case 'songReady': {
+                // All samples are loaded and the transport is rolling — start the UI.
+                const readyScene = message.sceneIndex ?? this.currentSongScene ?? 0;
+                this.currentSongScene = readyScene;
+                this.playingSceneIndex = readyScene;
+                this.sceneIterationLength = AppState.getMaxLengthInScene(readyScene);
+                this.sceneLength = 0;
+                this.playheadStep = 0;
+                this.isPlaying = true;
+                this.isPlayingScene = true;
+                this.scenePaused = false;
+                this.updateSongPlayButton(true, false);
+                this.updatePlayButton(true);
+                this.updatePlayAllButton(true, false);
+                this.updateTrackControlsState(true);
+                if (typeof SongScreen !== 'undefined')
+                    SongScreen.highlightPlayingScene(readyScene);
+                this._startSongPlayheadAnimation(readyScene);
                 break;
             }
 
@@ -2514,8 +2663,7 @@ const AudioBridge = {
                     if (typeof SongScreen !== 'undefined')
                         SongScreen.highlightPlayingScene(newScene);
                     this._startSongPlayheadAnimation(newScene);
-                    // Pre-queue the scene after this one
-                    this._preQueueNextSongScene(newScene + 1);
+                    // C++ handles all pre-queuing internally — no JS round-trip needed
                 }
                 break;
             }
@@ -2576,8 +2724,11 @@ const AudioBridge = {
     startMidiRecord(trackIndex) {
         this.midiRecordingTrack = trackIndex;
         this._pendingRecordNotes = {};
-        this._recordStartTime = performance.now();
+        this._recordStartTime = null;           // Clock starts on the first note-on, not on button press
         this._recordHeadStep = 0;
+        this._recordWaitingForFirstNote = true;
+        this._recordCurrentPitchBend = 64;
+        this._recordCurrentModulation = 0;
 
         // Ensure connect is active so MIDI events flow
         if (!this.midiConnectedTracks[trackIndex]) {
@@ -2606,20 +2757,20 @@ const AudioBridge = {
      * when the clip length is reached.
      */
     _animateRecordHead() {
-        if (this.midiRecordingTrack === null || this._recordStartTime === null) return;
+        if (this.midiRecordingTrack === null) return;
 
         this._recordHeadStep = this._getRecordHeadStep();
 
         // Drive the piano-roll playhead so the user can see progress
         this.playheadStep = this._recordHeadStep;
 
-        // Redraw the grid to show the moving record head
+        // Redraw the grid to show the moving record head (or the waiting-at-0 state)
         if (typeof ClipEditor !== 'undefined' && ClipEditor.gridCtx) {
             ClipEditor.renderPianoGrid();
         }
 
-        // Auto-stop when record head reaches the clip length
-        if (typeof AppState !== 'undefined') {
+        // Auto-stop only once recording has actually started (after first note)
+        if (!this._recordWaitingForFirstNote && typeof AppState !== 'undefined') {
             const clip = AppState.getClip(AppState.currentScene, this.midiRecordingTrack);
             const clipLength = clip ? (clip.length || 64) : 64;
             if (this._recordHeadStep >= clipLength) {
@@ -2647,6 +2798,7 @@ const AudioBridge = {
         this.midiRecordingTrack = null;
         this._recordStartTime = null;
         this._recordHeadStep = 0;
+        this._recordWaitingForFirstNote = false;
 
         // Finalize any notes still held at stop time
         if (typeof AppState !== 'undefined') {
@@ -2654,7 +2806,10 @@ const AudioBridge = {
             if (clip) {
                 Object.entries(this._pendingRecordNotes).forEach(([pitch, info]) => {
                     const duration = Math.max(1, Math.round(finalStep - info.start));
-                    clip.notes.push({ pitch: parseInt(pitch, 10), start: info.start, duration: duration, velocity: info.velocity });
+                    const note = { pitch: info.mappedPitch ?? parseInt(pitch, 10), start: info.start, duration: duration, velocity: info.velocity };
+                    if (info.pitchBend !== undefined && info.pitchBend !== 64) note.pitchBend = info.pitchBend;
+                    if (info.modulation !== undefined && info.modulation !== 0)  note.modulation = info.modulation;
+                    clip.notes.push(note);
                 });
             }
         }
@@ -2674,14 +2829,60 @@ const AudioBridge = {
     },
 
     /**
+     * Map an incoming MIDI pitch from C Major to the track's configured scale/root.
+     *
+     * The user plays in C Major (white keys = C,D,E,F,G,A,B). Each C Major scale
+     * degree is mapped to the same degree in the track's target scale, preserving
+     * octave. Non-C-Major notes (black keys) are snapped to the nearest C Major
+     * note before mapping.
+     *
+     * Returns the original pitch unchanged if the track has no scale set.
+     */
+    _mapCMajorToScale(pitch, trackIndex) {
+        if (typeof ClipEditor === 'undefined') return pitch;
+        const trackScale = ClipEditor.getTrackScale(trackIndex);
+        if (!trackScale || trackScale.scale === 'none') return pitch;
+
+        const targetScaleData = ClipEditor.SCALES[trackScale.scale];
+        if (!targetScaleData || targetScaleData.intervals.length === 0) return pitch;
+
+        const CM = [0, 2, 4, 5, 7, 9, 11]; // C Major semitone intervals
+        const octave      = Math.floor(pitch / 12);
+        const noteInOct   = pitch % 12;
+
+        // Find degree in C Major — snap to nearest if note is a black key
+        let degree = CM.indexOf(noteInOct);
+        if (degree === -1) {
+            let minDist = Infinity;
+            CM.forEach((interval, i) => {
+                // Circular distance within the octave
+                const dist = Math.min(
+                    Math.abs(noteInOct - interval),
+                    Math.abs(noteInOct - interval + 12),
+                    Math.abs(noteInOct - interval - 12)
+                );
+                if (dist < minDist) { minDist = dist; degree = i; }
+            });
+        }
+
+        // Map that degree to the same degree in the target scale
+        const ti       = targetScaleData.intervals;
+        const degIdx   = degree % ti.length;
+        const octShift = Math.floor(degree / ti.length);
+        const mapped   = (octave + octShift) * 12 + trackScale.root + ti[degIdx];
+        return Math.max(0, Math.min(127, mapped));
+    },
+
+    /**
      * Populate a <select> element with MIDI input device names.
      * Always requests a fresh list from JUCE; if a cached list exists it is
      * applied immediately and then overwritten when the response arrives.
      */
     populateMidiInputDevices(selectEl, currentValue) {
         const populate = (devices) => {
-            // Preserve the "None" option at index 0
-            while (selectEl.options.length > 1) selectEl.remove(1);
+            // Preserve the fixed "None" (index 0) and "Any" (index 1) options;
+            // remove only the dynamically-added device entries beyond them.
+            while (selectEl.options.length > 2) selectEl.remove(2);
             devices.forEach(name => {
                 const opt = document.createElement('option');
                 opt.value = name;

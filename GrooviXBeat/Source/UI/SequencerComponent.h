@@ -46,6 +46,39 @@ class GraphDocumentComponent;
 #include "../Sequencer/DrumKitManager.h"
 #include "../Plugins/TrackMixerPlugin.h"
 
+/**
+ * Provides tempo/transport information to VST plugins via the JUCE AudioPlayHead API.
+ * All fields are atomic so they can be written from the message thread and read
+ * safely on the audio thread inside each plugin's processBlock().
+ */
+class GroovixPlayHead final : public juce::AudioPlayHead
+{
+public:
+    Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo info;
+        juce::AudioPlayHead::TimeSignature timeSig;
+        timeSig.numerator   = 4;
+        timeSig.denominator = 4;
+
+        info.setBpm           (bpm.load (std::memory_order_relaxed));
+        info.setIsPlaying     (playing.load (std::memory_order_relaxed));
+        info.setIsRecording   (false);
+        info.setTimeSignature (timeSig);
+        info.setPpqPosition   (ppqPos.load (std::memory_order_relaxed));
+        return info;
+    }
+
+    void setTempo      (double newBpm)  { bpm.store (newBpm,    std::memory_order_relaxed); }
+    void setIsPlaying  (bool isPlaying) { playing.store (isPlaying, std::memory_order_relaxed); }
+    void setPpqPosition(double ppq)     { ppqPos.store (ppq,    std::memory_order_relaxed); }
+
+private:
+    std::atomic<double> bpm    { 120.0 };
+    std::atomic<bool>   playing{ false };
+    std::atomic<double> ppqPos { 0.0 };
+};
+
 //==============================================================================
 // SequencerComponent for embedding in tabs
 class SequencerComponent final : public Component,
@@ -151,6 +184,8 @@ private:
     // Setup the master mixer node (inserted between all track mixers and the audio output)
     void setupMasterMixer();
 
+    GroovixPlayHead groovixPlayHead;
+
     GraphDocumentComponent& graphDocument;
     PluginGraph& pluginGraph;
     std::unique_ptr<CustomWebBrowser> webBrowser;
@@ -227,10 +262,27 @@ private:
     struct MidiInputRoute
     {
         juce::String deviceIdentifier;
-        int channel = 0;   // 0 = all channels, 1-16 = specific
+        int  channel   = 0;     // 0 = all channels, 1-16 = specific
+        bool anyDevice = false; // true = accept MIDI from every connected device
+        std::map<int, int> activeMappedNotes; // original pitch → mapped pitch for note-off pairing
     };
     std::map<int, MidiInputRoute> midiInputRoutes;  // trackIndex -> route
     juce::CriticalSection midiInputRouteLock;
+
+    /** Per-track C Major → target scale remapping config (written from message thread, read from MIDI thread under lock). */
+    struct TrackMidiMapping
+    {
+        bool             useCMajorMapping = false;
+        int              scaleRoot        = 0;
+        std::vector<int> scaleIntervals;  // semitone offsets from root, e.g. [0,2,3,5,7,8,10]
+    };
+    std::map<int, TrackMidiMapping> trackMidiMappings; // trackIndex -> mapping config
+    // Protected by midiInputRouteLock (same lock used by handleIncomingMidiMessage)
+
+    /** Remap a MIDI pitch from C Major to the target scale described by mapping.
+     *  Black keys are snapped to the nearest C Major note before mapping.
+     *  Returns the original pitch if mapping is disabled or no scale is set. */
+    static int remapCMajorPitch(int pitch, const TrackMidiMapping& mapping);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SequencerComponent)
 };

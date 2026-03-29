@@ -271,6 +271,7 @@ void SamplePlayerPlugin::queuePlay(double offsetSeconds)
     queuedToPlay = true;
     queuedToStop = false;
     queuedOffset = offsetSeconds;
+    targetStopSample.store(-1, std::memory_order_relaxed);  // cancel any stale stop
 
     DBG("SamplePlayerPlugin: Queued to play (offset: " + juce::String(offsetSeconds, 3) + "s)");
 }
@@ -705,6 +706,11 @@ void SamplePlayerPlugin::setCumulativePosition(int64_t pos)
 
 void SamplePlayerPlugin::setTargetStartSample(int64_t samplePos)
 {
+    // Arming a new START cancels any previously queued STOP.  Without this, a
+    // stale targetStopSample left over from a scene transition (queued when this
+    // track was not yet playing) fires immediately after the new START triggers,
+    // silencing the sample before it outputs any audio.
+    targetStopSample.store(-1, std::memory_order_relaxed);
     targetStartSample.store(samplePos, std::memory_order_relaxed);
 }
 

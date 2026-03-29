@@ -616,6 +616,19 @@ void MidiBridge::preQueueSongScene(int sceneIndex,
 
     songHasNextScene = true;
 
+    // Preload next-scene sample files into cache now, while the current scene is
+    // still playing.  This way advanceSongScene() gets a cache-hit for every file
+    // and queueSampleFileSeamless runs with no disk I/O — eliminating the late-start
+    // problem where the last sample in the loop would miss its targetStartSample.
+    if (samplePlayerManager != nullptr && !nextSceneSamples.empty())
+    {
+        juce::StringArray pathsToCache;
+        for (const auto& s : nextSceneSamples)
+            if (s.filePath.isNotEmpty())
+                pathsToCache.add(s.filePath);
+        samplePlayerManager->preloadSamplesForLiveMode(pathsToCache);
+    }
+
     DBG("MidiBridge::preQueueSongScene - scene " + juce::String(sceneIndex) +
         " duration " + juce::String(durationBeats) + " beats" +
         " midiTracks " + juce::String(midiClipsArray.isArray() ? midiClipsArray.size() : 0) +
@@ -712,9 +725,169 @@ void MidiBridge::advanceSongScene()
         inSongMode = true;
     }
 
-    // 5. Notify JS — it will update UI and pre-queue the scene after this one
+    // 5. Notify JS for UI updates (highlight new scene row, restart playhead animation).
+    //    JS no longer needs to call preQueueSongScene — C++ owns sequencing via the queue.
     if (songSceneChangedCallback)
         songSceneChangedCallback(advancedToScene);
 
+    // 6. If the queue was populated by startSong(), advance the index and pre-queue the
+    //    scene after this one so the next transition is also instant.
+    if (!songSceneQueue.empty())
+    {
+        currentSongQueueIndex++;
+        loadNextSceneFromQueue();
+    }
+
     DBG("MidiBridge::advanceSongScene - now at scene " + juce::String(advancedToScene));
+}
+
+// =============================================================================
+// C++-driven Song sequencing
+// =============================================================================
+
+void MidiBridge::loadNextSceneFromQueue()
+{
+    int nextIdx = currentSongQueueIndex + 1;
+    if (songSceneQueue.empty() || nextIdx >= (int)songSceneQueue.size())
+    {
+        songHasNextScene = false;
+        DBG("MidiBridge::loadNextSceneFromQueue - no more scenes (queue exhausted)");
+        return;
+    }
+
+    const SongSceneData& next = songSceneQueue[nextIdx];
+    songNextSceneIndex         = next.sceneIndex;
+    songNextSceneDurationBeats = next.durationBeats;
+    nextSceneMidiClipsVar      = next.midiClipsVar;
+    nextSceneSamples           = next.sampleClips;
+    songHasNextScene           = true;
+
+    // Preload sample files into cache now, while the current scene is still playing,
+    // so advanceSongScene() finds everything in cache (zero disk I/O at boundary).
+    if (samplePlayerManager != nullptr && !nextSceneSamples.empty())
+    {
+        juce::StringArray paths;
+        for (const auto& s : nextSceneSamples)
+            if (s.filePath.isNotEmpty())
+                paths.add(s.filePath);
+        samplePlayerManager->preloadSamplesForLiveMode(paths);
+    }
+
+    DBG("MidiBridge::loadNextSceneFromQueue - pre-queued scene " + juce::String(next.sceneIndex)
+        + " (" + juce::String(next.durationBeats) + " beats, "
+        + juce::String((int)nextSceneSamples.size()) + " sample track(s))");
+}
+
+void MidiBridge::startSong(const juce::var& scenesArray)
+{
+    if (!scenesArray.isArray() || scenesArray.size() == 0)
+    {
+        DBG("MidiBridge::startSong - no scenes provided");
+        return;
+    }
+
+    // 1. Stop any current playback and clear state
+    stop();
+    stopSongMode();
+
+    // 2. Parse all scene data into the queue
+    songSceneQueue.clear();
+    currentSongQueueIndex = -1;
+
+    for (int i = 0; i < scenesArray.size(); ++i)
+    {
+        const auto& sv = scenesArray[i];
+        SongSceneData data;
+        data.sceneIndex    = sv.getProperty("sceneIndex", i);
+        data.durationBeats = sv.getProperty("durationBeats", 4.0);
+        data.midiClipsVar  = sv.getProperty("midiClips", juce::var());
+
+        const auto& samplesVar = sv.getProperty("sampleFiles", juce::var());
+        if (samplesVar.isArray())
+        {
+            for (int j = 0; j < samplesVar.size(); ++j)
+            {
+                const auto& s = samplesVar[j];
+                SongSampleClip clip;
+                clip.trackIndex      = s.getProperty("trackIndex",      0);
+                clip.filePath        = s.getProperty("filePath",        "").toString();
+                clip.offset          = s.getProperty("offset",          0.0);
+                clip.loop            = s.getProperty("loop",            true);
+                clip.loopLengthBeats = s.getProperty("loopLengthBeats", 4.0);
+                if (clip.filePath.isNotEmpty())
+                    data.sampleClips.push_back(clip);
+            }
+        }
+        songSceneQueue.push_back(std::move(data));
+    }
+
+    if (songSceneQueue.empty())
+        return;
+
+    DBG("MidiBridge::startSong - " + juce::String((int)songSceneQueue.size()) + " scene(s) queued");
+
+    // 3. Preload ALL unique sample paths from ALL scenes at once.
+    //    Because many songs reuse the same file in multiple scenes, the unique-file
+    //    count is typically small.  preloadSamplesForLiveMode() skips already-cached
+    //    entries so calling it again on the next startSong() is also cheap.
+    if (samplePlayerManager != nullptr)
+    {
+        juce::StringArray allPaths;
+        std::set<juce::String> seen;
+        for (const auto& scene : songSceneQueue)
+        {
+            for (const auto& s : scene.sampleClips)
+            {
+                if (s.filePath.isNotEmpty() && seen.find(s.filePath) == seen.end())
+                {
+                    allPaths.add(s.filePath);
+                    seen.insert(s.filePath);
+                }
+            }
+        }
+        if (allPaths.size() > 0)
+        {
+            DBG("MidiBridge::startSong - preloading " + juce::String(allPaths.size()) + " unique sample file(s)");
+            samplePlayerManager->preloadSamplesForLiveMode(allPaths);
+        }
+    }
+
+    currentSongQueueIndex = 0;
+    const SongSceneData& scene0 = songSceneQueue[0];
+
+    // 4. Set up MIDI clips for scene 0
+    clipScheduler.clearAllClips();
+    if (scene0.midiClipsVar.isArray())
+    {
+        for (int i = 0; i < scene0.midiClipsVar.size(); ++i)
+        {
+            const auto& clip = scene0.midiClipsVar[i];
+            clipScheduler.setClipFromVar(
+                clip.getProperty("trackIndex", 0),
+                clip.getProperty("notes",      juce::var()),
+                clip.getProperty("loopLength", 64.0),
+                clip.getProperty("program",    0),
+                clip.getProperty("isDrum",     false),
+                clip.getProperty("loop",       true));
+        }
+    }
+
+    // 5. Start scene 0's sample tracks (all files already in cache — instant, tight sync)
+    if (samplePlayerManager != nullptr && !scene0.sampleClips.empty())
+    {
+        for (const auto& s : scene0.sampleClips)
+            samplePlayerManager->playSampleFile(s.trackIndex, s.filePath, s.offset, s.loop, s.loopLengthBeats);
+    }
+
+    // 6. Arm scene-duration tracking for scene 0
+    setSongSceneDuration(scene0.durationBeats);
+
+    // 7. Pre-queue scene 1 (already cached; just populates nextScene* pointers)
+    loadNextSceneFromQueue();
+
+    // 8. Start transport — all samples and MIDI fire from this point
+    play();
+
+    DBG("MidiBridge::startSong - started scene " + juce::String(scene0.sceneIndex)
+        + " (" + juce::String(scene0.durationBeats) + " beats)");
 }

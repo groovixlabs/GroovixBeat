@@ -167,11 +167,13 @@ const SongScreen = {
 
             sceneLabel.appendChild(labelContainer);
 
-            // Scene label click - opens properties in settings mode
+            // Scene label click - opens properties in settings mode, or queues scene in live mode
             sceneLabel.addEventListener('click', (e) => {
                 if (this.settingsMode) {
                     e.stopPropagation();
                     this.openSceneProperties(row);
+                } else if (AudioBridge.liveMode) {
+                    AudioBridge.queueLiveScene(row);
                 }
             });
 

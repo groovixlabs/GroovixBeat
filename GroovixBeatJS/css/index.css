@@ -2903,6 +2903,30 @@ h1 {
 }
 
 /* Live Performance mode */
+#grid.live-mode .scene-label {
+    cursor: pointer;
+    box-shadow: inset 0 0 0 2px rgba(0, 255, 100, 0.3),
+                4px 4px 8px rgba(0, 0, 0, 0.5),
+                -4px -4px 8px rgba(255, 255, 255, 0.05);
+}
+
+#grid.live-mode .scene-label:hover {
+    box-shadow: inset 0 0 0 2px rgba(0, 255, 100, 0.7),
+                4px 4px 8px rgba(0, 0, 0, 0.5),
+                -4px -4px 8px rgba(255, 255, 255, 0.05);
+    background: rgba(0, 255, 100, 0.08);
+    color: #00ff64;
+}
+
+#grid.live-mode .scene-label.playing {
+    box-shadow: inset 0 0 0 2px rgba(0, 255, 100, 0.8),
+                4px 4px 8px rgba(0, 0, 0, 0.5),
+                -4px -4px 8px rgba(255, 255, 255, 0.05);
+    background: rgba(0, 255, 0, 0.15);
+    color: #00ff00;
+    animation: live-pulse 1s infinite;
+}
+
 #grid.live-mode .clip {
     cursor: pointer;
     box-shadow: inset 0 0 0 2px rgba(0, 255, 100, 0.4),

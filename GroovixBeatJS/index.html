@@ -562,11 +562,11 @@
             </div>
             <div class="track-settings-body">
                 <div class="track-settings-row">
-                    <label>Track Name:</label>
+                    <label title="The display name of this track.">Track Name:</label>
                     <span id="trackSettingsName" style="color: #d5a865; font-weight: 600;">Track 1</span>
                 </div>
                 <div class="track-settings-row">
-                    <label>Track Type:</label>
+                    <label title="VST Instrument: plays a loaded VST/AU plugin&#10;Sampled Instrument: plays a built-in sample-based instrument&#10;Sample: plays an audio file directly&#10;Drum Kit: plays a multi-pad drum kit">Track Type:</label>
                     <select id="trackTypeSelect" class="track-settings-select">
                         <option value="melody">VST Instrument</option>
                         <option value="sampled_instrument">Sampled Instrument</option>
@@ -575,7 +575,7 @@
                     </select>
                 </div>
                 <div class="track-settings-row track-settings-row-vst" id="vstInstrumentRow">
-                    <label>VST Instrument:
+                    <label title="Select the VST/AU plugin used by this track. Click Show UI to open the plugin's own editor window.">VST Instrument:
                         <button class="vst-show-ui-inline-btn" id="vstShowUiInlineBtn" title="Open VST Plugin UI">Show UI</button>
                     </label>
                     <div class="vst-inline-container">
@@ -586,30 +586,30 @@
                     </div>
                 </div>
                 <div class="track-settings-row" id="samplerInstrumentRow" style="display: none;">
-                    <label>Sampler Instrument:</label>
+                    <label title="Select the built-in sampled instrument (e.g. piano, strings) used by this track.">Sampler Instrument:</label>
                     <select id="samplerInstrumentSelect" class="track-settings-select">
                         <!-- Options populated dynamically from api/samplerInstrumentList.json -->
                     </select>
                     <span id="samplerLoadingIndicator" style="display: none; color: #d5a865; margin-left: 8px; font-size: 12px;">Loading...</span>
                 </div>
                 <div class="track-settings-row" id="trackPlaybackRow">
-                    <label>Playback:</label>
+                    <label title="Loop: the clip restarts automatically when it reaches the end&#10;One-Shot: the clip plays once and stops">Playback:</label>
                     <select id="trackPlaybackMode" class="track-settings-select">
                         <option value="loop">Loop</option>
                         <option value="oneshot">One-Shot</option>
                     </select>
                 </div>
                 <div class="track-settings-row" id="trackPercussionRow">
-                    <label>Percussion:</label>
+                    <label title="Enables percussion mode: uses General MIDI drum names for notes and routes output to MIDI channel 10.">Percussion:</label>
                     <div class="track-settings-checkbox">
                         <input type="checkbox" id="trackPercussionCheckbox">
                         <span style="color: #666; font-size: 11px;">Use drum names and MIDI channel 10</span>
                     </div>
                 </div>
                 <div class="track-settings-row" id="scaleSettingsRow">
-                    <label>Scale:</label>
+                    <label title="Sets the musical scale for this track. The piano roll highlights and optionally hides notes that are outside the chosen scale.">Scale:</label>
                     <div class="track-settings-scale">
-                        <select id="scaleRootSelect" class="track-settings-select" title="Root Note">
+                        <select id="scaleRootSelect" class="track-settings-select" title="Root note of the scale (e.g. D for D Minor)">
                             <option value="0">C</option>
                             <option value="1">C#</option>
                             <option value="2">D</option>
@@ -623,7 +623,7 @@
                             <option value="10">A#</option>
                             <option value="11">B</option>
                         </select>
-                        <select id="scaleTypeSelect" class="track-settings-select" title="Scale Type">
+                        <select id="scaleTypeSelect" class="track-settings-select" title="Scale type (e.g. Major, Natural Minor, Pentatonic)">
                             <option value="none">None</option>
                             <option value="major">Major</option>
                             <option value="minor">Natural Minor</option>
@@ -639,15 +639,15 @@
                             <option value="locrian">Locrian</option>
                             <option value="chromatic">Chromatic</option>
                         </select>
-                        <div class="track-settings-checkbox">
+                        <div class="track-settings-checkbox" title="When checked, notes outside the selected scale are hidden in the piano roll so you can only draw in-scale notes.">
                             <input type="checkbox" id="trackHideNotesNotInScale">
                             <span style="color: #666; font-size: 11px;">Hide Non Scale</span>
                         </div>
                     </div>
                 </div>
                 <div class="track-settings-row" id="midiChannelRow">
-                    <label>MIDI :</label>
-                    <select id="trackMidiChannel" class="track-settings-select">
+                    <label title="MIDI output channel used when sending notes to the VST instrument (1–16). Channel 10 is reserved for drums in General MIDI.">MIDI :</label>
+                    <select id="trackMidiChannel" class="track-settings-select" title="MIDI output channel">
                         <option value="0">Ch. 1</option>
                         <option value="1">Ch. 2</option>
                         <option value="2">Ch. 3</option>
@@ -665,16 +665,17 @@
                         <option value="14">Ch. 15</option>
                         <option value="15">Ch. 16</option>
                     </select>
-                    <select id="trackMidiInstrument" class="track-settings-select">
+                    <select id="trackMidiInstrument" class="track-settings-select" title="General MIDI program (instrument sound) sent to the VST on playback">
                         <!-- Options populated dynamically from AppState.GM_INSTRUMENTS -->
                     </select>
                 </div>
                 <div class="track-settings-row" id="midiInputRow" style="display: none;">
-                    <label>Midi From:</label>
-                    <select id="midiInputDeviceSelect" class="track-settings-select">
+                    <label title="Select an external MIDI device and channel to feed live notes into this track's instrument.">Midi From:</label>
+                    <select id="midiInputDeviceSelect" class="track-settings-select" title="External MIDI input device">
                         <option value="">None</option>
+                        <option value="__any__">Any</option>
                     </select>
-                    <select id="midiInputChannelSelect" class="track-settings-select" style="width: 90px;">
+                    <select id="midiInputChannelSelect" class="track-settings-select" style="width: 90px;" title="Filter incoming MIDI to a specific channel, or accept all channels">
                         <option value="0">All Ch.</option>
                         <option value="1">Ch. 1</option>
                         <option value="2">Ch. 2</option>
@@ -693,6 +694,9 @@
                         <option value="15">Ch. 15</option>
                         <option value="16">Ch. 16</option>
                     </select>
+                    <label style="margin-left: 10px; white-space: nowrap;" title="If this is checked, When you play in CMajor Scale it will get mapped to the Track Scale.">
+                        <input type="checkbox" id="useCMajorCheckbox" style="margin-right: 4px;">Use CMajor
+                    </label>
                 </div>
             </div>
             <div class="track-settings-footer">

@@ -319,7 +319,7 @@
     <div class="clip-editor-overlay" id="clipEditorOverlay">
         <div class="clip-editor">
             <div class="track-buttons-section">
-                <div class="track-buttons" id="trackButtons">
+                <div class="track-buttons-fixed">
                     <button class="play-all-btn" id="playAllTracksBtn" title="Play/Pause All Tracks">
                         <span class="icon icon-play"></span>
                     </button>
@@ -327,6 +327,7 @@
                         <span class="icon icon-stop"></span>
                     </button>
                 </div>
+                <div class="track-buttons" id="trackButtons"></div>
             </div>
 
             <div class="editor-toolbar">
@@ -645,29 +646,21 @@
                         </div>
                     </div>
                 </div>
-                <div class="track-settings-row" id="midiChannelRow">
-                    <label title="MIDI output channel used when sending notes to the VST instrument (1–16). Channel 10 is reserved for drums in General MIDI.">MIDI :</label>
-                    <select id="trackMidiChannel" class="track-settings-select" title="MIDI output channel">
-                        <option value="0">Ch. 1</option>
-                        <option value="1">Ch. 2</option>
-                        <option value="2">Ch. 3</option>
-                        <option value="3">Ch. 4</option>
-                        <option value="4">Ch. 5</option>
-                        <option value="5">Ch. 6</option>
-                        <option value="6">Ch. 7</option>
-                        <option value="7">Ch. 8</option>
-                        <option value="8">Ch. 9</option>
-                        <option value="9">Ch. 10 (Drums)</option>
-                        <option value="10">Ch. 11</option>
-                        <option value="11">Ch. 12</option>
-                        <option value="12">Ch. 13</option>
-                        <option value="13">Ch. 14</option>
-                        <option value="14">Ch. 15</option>
-                        <option value="15">Ch. 16</option>
-                    </select>
-                    <select id="trackMidiInstrument" class="track-settings-select" title="General MIDI program (instrument sound) sent to the VST on playback">
-                        <!-- Options populated dynamically from AppState.GM_INSTRUMENTS -->
-                    </select>
+
+                <div class="track-settings-row" id="ghostNotesRow" style="display: none;">
+                    <label title="Show this track's notes as semi-transparent ghost notes in other tracks' piano roll.">
+                        <input type="checkbox" id="trackGhostNotesCheckbox" style="margin-right: 4px;">Show Ghost Notes
+                    </label>
+                    <!--
+                    <div class="track-settings-checkbox">
+                        <input type="checkbox" id="trackGhostNotesCheckbox">
+                        <span style="color: #666; font-size: 11px;">Show as ghost in other tracks</span>
+                    </div>
+                    -->
+                    <label style="margin-left: 10px; white-space: nowrap;" title="If this is checked, When you play in CMajor Scale it will get mapped to the Track Scale.">
+                        <input type="checkbox" id="useCMajorCheckbox" style="margin-right: 4px;">Use CMajor
+                    </label>
+
                 </div>
                 <div class="track-settings-row" id="midiInputRow" style="display: none;">
                     <label title="Select an external MIDI device and channel to feed live notes into this track's instrument.">Midi From:</label>
@@ -694,9 +687,6 @@
                         <option value="15">Ch. 15</option>
                         <option value="16">Ch. 16</option>
                     </select>
-                    <label style="margin-left: 10px; white-space: nowrap;" title="If this is checked, When you play in CMajor Scale it will get mapped to the Track Scale.">
-                        <input type="checkbox" id="useCMajorCheckbox" style="margin-right: 4px;">Use CMajor
-                    </label>
                 </div>
             </div>
             <div class="track-settings-footer">
@@ -969,5 +959,11 @@ d, B, G,| F, E, c,/2>c,/2| B, G, A,| G,2|]
             InitImportDialog();
         });
     </script>
+
+    <!-- Unified busy/loading overlay -->
+    <div id="busyOverlay" style="display:none;">
+        <div class="busy-spinner"></div>
+        <div id="busyMessage" class="busy-message">Loading…</div>
+    </div>
 </body>
 </html>

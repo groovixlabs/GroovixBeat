@@ -604,6 +604,7 @@ const AudioBridge = {
         this.sceneResumeOffset = 0;
 
         // Show loading indicator on the button right away.
+        showBusy('Preloading samples\u2026');
         if (typeof SongScreen !== 'undefined') {
             SongScreen.setLiveModeLoadingState('loading');
         }
@@ -654,6 +655,7 @@ const AudioBridge = {
     // Fully activates live mode: JS state, quantize loop, and UI.
     onLiveModePreloadComplete: function() {
         console.log('[AudioBridge] onLiveModePreloadComplete — activating live mode');
+        hideBusy();
         this.liveModePreloading = false;
         this.liveMode = true;
         this.livePlayingClips = {};
@@ -669,6 +671,7 @@ const AudioBridge = {
 
     stopLiveMode: function() {
         this.liveMode = false;
+        if (this.liveModePreloading) hideBusy(); // cancelled mid-preload
         this.liveModePreloading = false;
 
         if (typeof SongScreen !== 'undefined') SongScreen.stopPlayheadLoop();
@@ -911,7 +914,7 @@ const AudioBridge = {
                     notes: notesToSchedule,
                     loopLength: clipLength,
                     loop: playbackMode === 'loop',
-                    program: trackSettings.midiProgram || 0,
+                    program: 0,
                     isDrum: trackSettings.isPercussion || false
                 },
                 timestamp
@@ -1000,7 +1003,7 @@ const AudioBridge = {
                     notes: notesToSchedule,
                     loopLength: clipLength,
                     loop: (clip.playMode || 'loop') === 'loop',
-                    program: trackSettings.midiProgram || 0,
+                    program: 0,
                     isDrum: trackSettings.isPercussion || false
                 },
                 timestamp
@@ -1320,7 +1323,7 @@ const AudioBridge = {
                             notes: notesToSchedule,
                             loopLength: clipLength,
                             loop: (clip.playMode || 'loop') === 'loop',
-                            program: trackSettings.midiProgram || 0,
+                            program: 0,
                             isDrum: trackSettings.isPercussion || false
                         },
                         timestamp
@@ -1386,7 +1389,7 @@ const AudioBridge = {
                         notes: notesToSchedule,
                         loopLength: clipLength,
                         loop: (clip.playMode || 'loop') === 'loop',
-                        program: trackSettings.midiProgram || 0,
+                        program: 0,
                         isDrum: trackSettings.isPercussion || false
                     },
                     timestamp
@@ -1713,7 +1716,7 @@ const AudioBridge = {
                         notes: notesToSchedule,
                         loopLength: loopLength,
                         loop: (clip.playMode || 'loop') === 'loop',
-                        program: trackSettings.midiProgram || 0,
+                        program: 0,
                         isDrum: trackSettings.isPercussion || false
                     },
                     timestamp
@@ -1886,7 +1889,7 @@ const AudioBridge = {
                     notes: notesToSchedule,
                     loopLength: clipLength,
                     loop: (clip.playMode || 'loop') === 'loop',
-                    program: trackSettings.midiProgram || 0,
+                    program: 0,
                     isDrum: trackSettings.isPercussion || false
                 });
             }
@@ -1976,7 +1979,7 @@ const AudioBridge = {
                     notes: notesToSchedule,
                     loopLength: clipLength,
                     loop: (clip.playMode || 'loop') === 'loop',
-                    program: trackSettings.midiProgram || 0,
+                    program: 0,
                     isDrum: trackSettings.isPercussion || false
                 });
             }
@@ -2007,6 +2010,7 @@ const AudioBridge = {
      */
     _stopSong(timestamp) {
         this._pendingPlayCommand = null;
+        hideBusy(); // clear any song-loading spinner that may be visible
 
         // Tell C++ to clear song mode state
         if (this.externalHandler) {
@@ -2451,9 +2455,11 @@ const AudioBridge = {
                 if (message.loading) {
                     this.samplerLoadingTracks.add(message.trackIndex);
                     console.log('[AudioBridge] Sampler loading started for track', message.trackIndex);
+                    showBusy('Loading instrument\u2026');
                 } else {
                     this.samplerLoadingTracks.delete(message.trackIndex);
                     console.log('[AudioBridge] Sampler loading finished for track', message.trackIndex);
+                    hideBusy();
                 }
                 // Update play button icon (hourglass while loading, play when done)
                 this.updatePlayButton(this.isPlaying, this.clipPaused);
@@ -2618,11 +2624,13 @@ const AudioBridge = {
                 // (Usually the spinner is already showing from _playSong; this ensures
                 // it is shown even if the message arrives slightly late.)
                 this.updateSongPlayButton(false, false, true);
+                showBusy('Loading song\u2026');
                 break;
             }
 
             case 'songReady': {
                 // All samples are loaded and the transport is rolling — start the UI.
+                hideBusy();
                 const readyScene = message.sceneIndex ?? this.currentSongScene ?? 0;
                 this.currentSongScene = readyScene;
                 this.playingSceneIndex = readyScene;
@@ -3059,8 +3067,33 @@ const AudioBridge = {
 };
 
 // Attach event handlers when DOM is ready
+// ============================================================
+// Unified busy overlay — reference-counted so concurrent loads
+// (e.g. startup + sampler load) each need their own hideBusy().
+// ============================================================
+(function() {
+    let _count = 0;
+    window.showBusy = function(message) {
+        _count++;
+        const el  = document.getElementById('busyOverlay');
+        const msg = document.getElementById('busyMessage');
+        if (msg && message) msg.textContent = message;
+        if (el) el.style.display = 'flex';
+    };
+    window.hideBusy = function() {
+        if (_count > 0) _count--;
+        if (_count === 0) {
+            const el = document.getElementById('busyOverlay');
+            if (el) el.style.display = 'none';
+        }
+    };
+})();
+
 document.addEventListener('DOMContentLoaded', () => {
     AudioBridge.attachEventHandlers();
+    // Show spinner immediately; hidden once JUCE connects (or after timeout in browser-only mode).
+    showBusy('Starting\u2026');
+    setTimeout(() => hideBusy(), 6000); // fallback: auto-hide if JUCE never calls connectToJUCE
 });
 
 // Don't auto-connect - let JUCE explicitly call connectToJUCE()
@@ -3072,6 +3105,7 @@ if (typeof window !== 'undefined') {
         // Try to connect immediately
         if (AudioBridge.autoConnectJUCE()) {
             console.log('[AudioBridge] Connected to JUCE webview');
+            hideBusy(); // hide the "Starting…" spinner
             return "Juce Connected.";
         }
 
@@ -3087,6 +3121,7 @@ if (typeof window !== 'undefined') {
 
             if (AudioBridge.autoConnectJUCE()) {
                 console.log('[AudioBridge] Connected to JUCE webview on retry ' + retryCount);
+                hideBusy(); // hide the "Starting…" spinner
                 return true;
             }
 
@@ -3094,6 +3129,7 @@ if (typeof window !== 'undefined') {
                 setTimeout(retryConnection, retryInterval);
             } else {
                 console.error('[AudioBridge] Failed to connect to JUCE after ' + maxRetries + ' retries');
+                hideBusy(); // give up — don't block the UI
             }
         };
 

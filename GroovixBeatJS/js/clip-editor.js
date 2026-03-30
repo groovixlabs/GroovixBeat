@@ -1425,42 +1425,11 @@ const ClipEditor = {
     // Render track buttons
     renderTrackButtons: function() {
         const container = document.getElementById('trackButtons');
-
-        // Preserve the play-all and stop-all buttons
-        const playAllBtn = document.getElementById('playAllTracksBtn');
-        const stopAllBtn = document.getElementById('stopAllTracksBtn');
         container.innerHTML = '';
-        if (playAllBtn) {
-            container.appendChild(playAllBtn);
-        }
-        if (stopAllBtn) {
-            container.appendChild(stopAllBtn);
-        }
 
         for (let t = 0; t < AppState.numTracks; t++) {
             const wrapper = document.createElement('div');
             wrapper.className = 'track-btn-group';
-
-            // Ghost eye button (disabled for current track to keep layout stable)
-            const ghostBtn = document.createElement('button');
-            ghostBtn.className = 'track-ghost-btn' + (this.ghostTracks.has(t) ? ' active' : '');
-            ghostBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-            if (t === AppState.currentTrack) {
-                ghostBtn.disabled = true;
-                ghostBtn.title = 'Current track';
-            } else {
-                ghostBtn.title = 'Toggle ghost notes';
-                ghostBtn.addEventListener('click', () => {
-                    if (this.ghostTracks.has(t)) {
-                        this.ghostTracks.delete(t);
-                    } else {
-                        this.ghostTracks.add(t);
-                    }
-                    this.renderTrackButtons();
-                    this.renderPianoGrid();
-                });
-            }
-            wrapper.appendChild(ghostBtn);
 
             const btn = document.createElement('button');
             btn.className = 'track-btn';
@@ -1501,6 +1470,16 @@ const ClipEditor = {
 
             wrapper.appendChild(btn);
             container.appendChild(wrapper);
+        }
+
+        // Scroll the active track button into view
+        const activeBtn = container.querySelector('.track-btn.active');
+        if (activeBtn) activeBtn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+        // Show right-edge fade hint when the row overflows
+        const section = container.closest('.track-buttons-section');
+        if (section) {
+            section.classList.toggle('overflows', container.scrollWidth > container.clientWidth);
         }
     },
 
@@ -2777,15 +2756,13 @@ const ClipEditor = {
         const modal = document.getElementById('trackSettingsModal');
         const nameSpan = document.getElementById('trackSettingsName');
         const trackTypeSelect = document.getElementById('trackTypeSelect');
-        const channelSelect = document.getElementById('trackMidiChannel');
-        const instrumentSelect = document.getElementById('trackMidiInstrument');
         const trackPlaybackSelect = document.getElementById('trackPlaybackMode');
         const trackPlaybackRow = document.getElementById('trackPlaybackRow');
         const scaleRootSelect = document.getElementById('scaleRootSelect');
         const scaleTypeSelect = document.getElementById('scaleTypeSelect');
         const scaleSettingsRow = document.getElementById('scaleSettingsRow');
         const hideNotesCheckbox = document.getElementById('trackHideNotesNotInScale');
-        
+
         const samplerInstrumentRow = document.getElementById('samplerInstrumentRow');
         const samplerInstrumentSelect = document.getElementById('samplerInstrumentSelect');
         const percussionCheckbox = document.getElementById('trackPercussionCheckbox');
@@ -2796,16 +2773,6 @@ const ClipEditor = {
         const useCMajorCheckbox = document.getElementById('useCMajorCheckbox');
 
         if (!modal) return;
-
-        // Populate instrument select if empty
-        if (instrumentSelect.options.length === 0) {
-            AppState.GM_INSTRUMENTS.forEach((name, index) => {
-                const option = document.createElement('option');
-                option.value = index;
-                option.textContent = `${index}: ${name}`;
-                instrumentSelect.appendChild(option);
-            });
-        }
 
         // Get current clip settings (per-clip properties)
         const clip = AppState.getClip(AppState.currentScene, trackIndex);
@@ -2820,8 +2787,6 @@ const ClipEditor = {
         // Populate fields from track settings and clip properties
         nameSpan.textContent = AppState.getTrackName(trackIndex);
         trackTypeSelect.value = trackMode;
-        channelSelect.value = trackSettings.midiChannel || 0;
-        instrumentSelect.value = trackSettings.midiProgram || 0;
         trackPlaybackSelect.value = clip.playMode || 'loop';
         scaleRootSelect.value = scaleSettings.root;
         scaleTypeSelect.value = scaleSettings.scale;
@@ -2845,9 +2810,15 @@ const ClipEditor = {
         const isSamplerInstrument = trackMode === 'sampled_instrument';
         const isSample = trackMode === 'sample';
         const isDrumKit = trackMode === 'drum_kit';
+
+        // Ghost notes: visible for all non-sample tracks
+        const ghostNotesRow = document.getElementById('ghostNotesRow');
+        const ghostNotesCheckbox = document.getElementById('trackGhostNotesCheckbox');
+        if (ghostNotesRow && ghostNotesCheckbox) {
+            ghostNotesRow.style.display = isSample ? 'none' : 'flex';
+            ghostNotesCheckbox.checked = this.ghostTracks.has(trackIndex);
+        }
         samplerInstrumentRow.style.display = isSamplerInstrument ? 'flex' : 'none';
-        const midiChannelRow = document.getElementById('midiChannelRow');
-        if (midiChannelRow) midiChannelRow.style.display = isMelody ? 'flex' : 'none';
 
         // Show/hide Midi From row (for all MIDI-based tracks: melody, sampled_instrument, drum_kit)
         const showMidiInput = !isSample;
@@ -2950,8 +2921,6 @@ const ClipEditor = {
                 }
 
                 samplerInstrumentRow.style.display = isSamplerInstrument ? 'flex' : 'none';
-                const midiChannelRow = document.getElementById('midiChannelRow');
-                if (midiChannelRow) midiChannelRow.style.display = isMelody ? 'flex' : 'none';
 
                 // Toggle VST instrument row
                 const vstInstrumentRow = document.getElementById('vstInstrumentRow');
@@ -2975,6 +2944,12 @@ const ClipEditor = {
                     const showMidiInput = trackType !== 'sample';
                     midiInputRow.style.display = showMidiInput ? 'flex' : 'none';
                 }
+
+                // Show/hide ghost notes row
+                const ghostNotesRow = document.getElementById('ghostNotesRow');
+                if (ghostNotesRow) {
+                    ghostNotesRow.style.display = trackType !== 'sample' ? 'flex' : 'none';
+                }
             });
 
             // Toggle scale settings visibility when percussion checkbox changes
@@ -2983,6 +2958,17 @@ const ClipEditor = {
                 const scaleSettingsRow = document.getElementById('scaleSettingsRow');
                 const showScaleSettings = (trackType === 'melody' || trackType === 'sampled_instrument') && !e.target.checked;
                 scaleSettingsRow.style.display = showScaleSettings ? 'flex' : 'none';
+            });
+
+            // Ghost notes checkbox — takes effect immediately (no Save needed)
+            document.getElementById('trackGhostNotesCheckbox').addEventListener('change', (e) => {
+                const t = this.trackSettingsTrackIndex;
+                if (e.target.checked) {
+                    this.ghostTracks.add(t);
+                } else {
+                    this.ghostTracks.delete(t);
+                }
+                this.renderPianoGrid();
             });
         }
     },
@@ -3041,8 +3027,6 @@ const ClipEditor = {
     // Save track settings (track-level) and clip settings (clip-level)
     saveTrackSettings: function() {
         const trackTypeSelect = document.getElementById('trackTypeSelect');
-        const channelSelect = document.getElementById('trackMidiChannel');
-        const instrumentSelect = document.getElementById('trackMidiInstrument');
         const trackPlaybackSelect = document.getElementById('trackPlaybackMode');
         const scaleRootSelect = document.getElementById('scaleRootSelect');
         const scaleTypeSelect = document.getElementById('scaleTypeSelect');
@@ -3061,8 +3045,6 @@ const ClipEditor = {
             trackType: trackMode,
             // drum_kit doesn't have a percussion checkbox (it's always treated as percussion)
             isPercussion: (trackMode !== 'sample' && trackMode !== 'drum_kit') ? percussionCheckbox.checked : false,
-            midiChannel: parseInt(channelSelect.value, 10),
-            midiProgram: parseInt(instrumentSelect.value, 10),
             midiInputDevice: (trackMode !== 'sample' && midiInputDeviceSelect) ? midiInputDeviceSelect.value : '',
             midiInputChannel: (trackMode !== 'sample' && midiInputChannelSelect) ? parseInt(midiInputChannelSelect.value, 10) : 0,
             useCMajorMapping: (trackMode !== 'sample' && useCMajorCheckboxSave) ? useCMajorCheckboxSave.checked : false
@@ -3145,8 +3127,6 @@ const ClipEditor = {
         const trackSettings = AppState.getTrackSettings(this.trackSettingsTrackIndex);
         console.log('Track settings saved:', this.trackSettingsTrackIndex, {
             trackType: trackSettings.trackType,
-            midiChannel: trackSettings.midiChannel,
-            midiProgram: trackSettings.midiProgram,
             samplerInstrument: trackSettings.samplerInstrument,
             playMode: clip.playMode
         });

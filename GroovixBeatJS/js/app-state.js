@@ -70,7 +70,7 @@ const AppState = {
 
     // Clip data structure: clips[scene][track] = { ...clipProperties }
     // Per-clip: notes, length, playMode, mute, quantize, repeat
-    // Per-track (in trackSettings): trackType, midiProgram, midiChannel, instrument, fxChain
+    // Per-track (in trackSettings): trackType, instrument, fxChain
     // Each note: { pitch: number, start: number, duration: number }
     clips: [],
 
@@ -239,8 +239,6 @@ const AppState = {
     initTrackSettings: function(trackIndex) {
         if (!this.trackSettings[trackIndex]) {
             this.trackSettings[trackIndex] = {
-                midiChannel: trackIndex % 16,  // 0-15, default to track index mod 16
-                midiProgram: 0,                // 0-127, General MIDI program number
                 trackType: 'melody',           // 'melody', 'sample', 'sampled_instrument', or 'drum_kit'
                 isPercussion: false,           // Independent percussion flag (drum names + MIDI ch 10)
                 playbackMode: 'loop',          // 'oneshot' or 'loop' (for all track types)
@@ -694,8 +692,6 @@ const AppState = {
 
         // Clean track settings for serialization (track-level properties)
         const cleanTrackSettings = this.trackSettings.map(settings => ({
-            midiChannel: settings.midiChannel,
-            midiProgram: settings.midiProgram,
             trackType: settings.trackType || 'melody',
             isPercussion: settings.isPercussion || false,
             playbackMode: settings.playbackMode || 'loop',
@@ -891,8 +887,6 @@ const AppState = {
                     }
 
                     this.trackSettings[t] = {
-                        midiChannel: data.trackSettings[t].midiChannel !== undefined ? data.trackSettings[t].midiChannel : t % 16,
-                        midiProgram: data.trackSettings[t].midiProgram || 0,
                         trackType: trackType,
                         isPercussion: isPercussion,
                         playbackMode: data.trackSettings[t].playbackMode || 'loop',

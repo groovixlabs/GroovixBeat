@@ -337,6 +337,36 @@ h1 {
 
 .track-buttons-section {
     margin-bottom: 15px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0; /* allow flex children to shrink */
+}
+
+/* Play/stop all buttons — fixed left, never scroll */
+.track-buttons-fixed {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+/* Fade hint on the right edge when the row overflows */
+.track-buttons-section::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 40px;
+    height: 100%;
+    background: linear-gradient(to right, transparent, #1e1e1e);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.track-buttons-section.overflows::after {
+    opacity: 1;
 }
 
 .play-all-btn, .stop-all-btn {
@@ -392,13 +422,38 @@ h1 {
 .track-buttons {
     display: flex;
     gap: 8px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(213, 168, 101, 0.25) transparent;
+    padding-bottom: 4px; /* space for scrollbar without layout shift */
+    flex: 1;
+    min-width: 0;
+}
+
+.track-buttons::-webkit-scrollbar {
+    height: 3px;
+}
+
+.track-buttons::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.track-buttons::-webkit-scrollbar-thumb {
+    background: rgba(213, 168, 101, 0.25);
+    border-radius: 2px;
+}
+
+.track-buttons::-webkit-scrollbar-thumb:hover {
+    background: rgba(213, 168, 101, 0.5);
 }
 
 .track-btn {
     padding: 10px 16px;
     border: none;
     background: #242424;
+    white-space: nowrap;
     border-radius: 8px;
     box-shadow: 6px 6px 12px rgba(0, 0, 0, 0.7),
                 -6px -6px 12px rgba(255, 255, 255, 0.1);
@@ -451,49 +506,6 @@ h1 {
     gap: 2px;
 }
 
-/* Ghost note eye button next to track button */
-.track-ghost-btn {
-    width: 22px;
-    height: 28px;
-    border: none;
-    background: #1e1e1e;
-    border-radius: 6px;
-    color: #444;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    flex-shrink: 0;
-    transition: color 0.15s, background 0.15s;
-}
-
-.track-ghost-btn svg {
-    width: 13px;
-    height: 13px;
-}
-
-.track-ghost-btn:hover {
-    color: #999;
-    background: #2a2a2a;
-}
-
-.track-ghost-btn.active {
-    color: #d5a865;
-    background: rgba(213, 168, 101, 0.15);
-}
-
-.track-ghost-btn:disabled {
-    color: #333;
-    background: #1e1e1e;
-    cursor: default;
-    opacity: 0.4;
-}
-
-.track-ghost-btn.active:hover {
-    color: #e8bc78;
-    background: rgba(213, 168, 101, 0.25);
-}
 
 .editor-toolbar {
     display: flex;
@@ -3613,5 +3625,44 @@ h1 {
 
 .instr-item.instr-item-none .instr-item-name {
     font-style: italic;
+}
+
+/* ============================================================
+   Unified busy / loading overlay
+   ============================================================ */
+#busyOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(18, 18, 18, 0.78);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    pointer-events: all;
+}
+
+.busy-spinner {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 3px solid rgba(213, 168, 101, 0.18);
+    border-top-color: #d5a865;
+    animation: busy-spin 0.75s linear infinite;
+}
+
+.busy-message {
+    margin-top: 18px;
+    color: #d5a865;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    opacity: 0.9;
+}
+
+@keyframes busy-spin {
+    to { transform: rotate(360deg); }
 }
 

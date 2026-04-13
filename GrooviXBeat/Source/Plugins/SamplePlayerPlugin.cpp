@@ -772,6 +772,7 @@ void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
                                    : 0;
     if (blockIndex % 200 == 0)
     {
+        /*
         DBG("[SPP T" + juce::String(trackIndex) + "] STATE"
             + " playing=" + juce::String(playing ? 1 : 0)
             + " queuedPlay=" + juce::String(queuedToPlay ? 1 : 0)
@@ -783,6 +784,7 @@ void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
             + " tStart=" + juce::String(targetStartSample.load(std::memory_order_relaxed))
             + " tStop=" + juce::String(targetStopSample.load(std::memory_order_relaxed))
             + " cumPos=" + juce::String(blockStart));
+            */
     }
 
     // =========================================================================
@@ -999,6 +1001,7 @@ void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
         // unexpected stops. Rate-limited to avoid flooding.
         if (blockIndex % 150 == 0)
         {
+            /*
             DBG("[SPP T" + juce::String(trackIndex) + "] SILENT"
                 + " playing=" + juce::String(playing ? 1 : 0)
                 + " hasSource=" + juce::String(readerSource != nullptr ? 1 : 0)
@@ -1006,7 +1009,7 @@ void SamplePlayerPlugin::processBlock(juce::AudioBuffer<float>& buffer,
                 + " queuedPlay=" + juce::String(queuedToPlay ? 1 : 0)
                 + " tStart=" + juce::String(targetStartSample.load(std::memory_order_relaxed))
                 + " cumPos=" + juce::String(blockStart));
-                
+              */  
         }
         cumulativeSamplePosition += numSamples;
         return;

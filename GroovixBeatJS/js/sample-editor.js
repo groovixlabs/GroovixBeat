@@ -206,7 +206,8 @@ const SampleEditor = {
             'sampleShrinkBtn': () => this.stretchSample(0.99),
             'sampleZoomInBtn': () => this.zoomIn(),
             'sampleZoomOutBtn': () => this.zoomOut(),
-            'sampleZoomFitBtn': () => this.zoomFit()
+            'sampleZoomFitBtn': () => this.zoomFit(),
+            'sampleDetectBpmBtn': () => this.detectBpmAndShow()
         };
 
         for (const [id, handler] of Object.entries(tools)) {
@@ -423,17 +424,26 @@ const SampleEditor = {
         this.ctx.scale(dpr, dpr);
     },
 
-    // Request waveform data from C++ for display
-    requestWaveformFromCpp: function(trackIndex) {
+    // Maps trackIndex → sceneIndex for routing waveform results to the correct clip slot
+    pendingWaveformScenes: {},
+
+    // Request waveform data from C++ for display.
+    // Pass sceneIndex when loading a non-current clip so the result is stored in the right slot.
+    requestWaveformFromCpp: function(trackIndex, sceneIndex) {
         if (typeof AudioBridge === 'undefined' || !AudioBridge.isExternalMode()) {
             return;
+        }
+
+        // Track which scene this waveform belongs to (overrides AppState.currentScene in callback)
+        if (sceneIndex !== undefined) {
+            this.pendingWaveformScenes[trackIndex] = sceneIndex;
         }
 
         // Calculate number of points based on canvas width
         const width = this.canvas ? Math.floor(this.canvas.width / (window.devicePixelRatio || 1)) : 800;
         const numPoints = Math.max(400, Math.min(2000, width));
 
-        console.log('[SampleEditor] Requesting waveform from C++, track:', trackIndex, 'points:', numPoints);
+        console.log('[SampleEditor] Requesting waveform from C++, track:', trackIndex, 'scene:', sceneIndex, 'points:', numPoints);
 
         AudioBridge.send('cppGetWaveform', {
             trackIndex: trackIndex,
@@ -971,6 +981,77 @@ const SampleEditor = {
         this.zoom = 1.0;
         this.resizeCanvas();
         this.render();
+    },
+
+    detectBpmAndShow: function() {
+        const trackSample = this.getTrackSample(AppState.currentTrack);
+        if (!trackSample || !trackSample.fullPath) {
+            alert('No sample loaded.');
+            return;
+        }
+
+        const btn = document.getElementById('sampleDetectBpmBtn');
+        if (btn) btn.textContent = '...';
+
+        // Ask C++ to detect BPM; result arrives via handleCppBPMResult
+        AudioBridge.send('cppDetectBPM', { trackIndex: AppState.currentTrack });
+    },
+
+    showBpmResultModal: function(bpm) {
+        const modal = document.getElementById('bpmResultModal');
+        const valueEl = document.getElementById('bpmResultValue');
+        const projectEl = document.getElementById('bpmResultProjectTempo');
+        if (!modal) return;
+
+        const detectedBpm = bpm > 0 ? Math.round(bpm) : 0;
+        const projectBpm  = AppState.tempo || 120;
+
+        valueEl.textContent   = detectedBpm || '--';
+        projectEl.textContent = projectBpm;
+        modal.style.display   = 'flex';
+
+        const closeBtn   = document.getElementById('bpmResultCloseBtn');
+        const useBtn     = document.getElementById('bpmResultUseBtn');
+        const stretchBtn = document.getElementById('bpmResultStretchBtn');
+
+        const close = () => { modal.style.display = 'none'; };
+
+        closeBtn.onclick = close;
+        modal.onclick = (e) => { if (e.target === modal) close(); };
+
+        useBtn.onclick = () => {
+            if (detectedBpm > 0) {
+                AppState.tempo = detectedBpm;
+                const tempoInput = document.getElementById('tempoInput');
+                if (tempoInput) tempoInput.value = AppState.tempo;
+                AudioBridge.send('setTempo', { tempo: AppState.tempo });
+            }
+            close();
+        };
+
+        stretchBtn.onclick = () => {
+            if (detectedBpm <= 0) { alert('No BPM detected.'); return; }
+            const trackSample = this.getTrackSample(AppState.currentTrack);
+            if (!trackSample || !trackSample.fullPath) { alert('No sample loaded.'); return; }
+
+            trackSample.detectedBPM = detectedBpm;
+            close();
+
+            // Time-stretch sample from its detected BPM to the current project BPM
+            console.log('[BpmModal] Warping track', AppState.currentTrack,
+                        'from', detectedBpm, 'BPM to', projectBpm, 'BPM');
+            AudioBridge.send('cppApplyWarp', {
+                trackIndex: AppState.currentTrack,
+                sampleBPM: detectedBpm,
+                targetBPM: projectBpm,
+                targetLengthSeconds: 0
+            });
+
+            // Refresh waveform after C++ finishes stretching
+            setTimeout(() => {
+                this.requestWaveformFromCpp(AppState.currentTrack);
+            }, 50);
+        };
     },
 
     // Selection helpers
@@ -2190,6 +2271,17 @@ const SampleEditor = {
     pendingSampleCopies: {},
     sampleCopyRequestIdCounter: 0,
 
+    // Import an audio File object from a drag-and-drop event (JUCE mode only).
+    // Callers are responsible for extracting the native path before calling this.
+    importSampleFile: function(filePath) {
+        this.loadSampleFromJuce(filePath);
+    },
+
+    // Like importSampleFile but targets a specific scene/track slot (used by song screen drag-drop).
+    importSampleFileForSlot: async function(filePath, sceneIndex, trackIndex) {
+        await this.loadSampleFromJuce(filePath, sceneIndex, trackIndex);
+    },
+
     // Request JUCE to copy sample to project folder (called during project save)
     // Uses unique request IDs to handle multiple concurrent requests for the same track
     requestSampleCopy: function(sourcePath, trackIndex, sceneIndex) {
@@ -2279,21 +2371,21 @@ const SampleEditor = {
                 }
             }
 
-            // Load into C++ for editing and waveform generation (current clip only)
-            // Non-current clips get their waveform when user navigates to them
-            const isCurrentClip = (track === AppState.currentTrack && scene === (AppState.currentScene || 0));
-
-            if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode() && isCurrentClip) {
+            // Load into C++ for editing and waveform generation.
+            // Always send cppLoadForEditing so C++ can generate waveform peaks for any clip,
+            // not just the currently visible one (e.g. song screen drag-drop to a non-current slot).
+            if (typeof AudioBridge !== 'undefined' && AudioBridge.isExternalMode()) {
                 console.log('[SampleEditor] Loading sample for editing in C++ - track:', track, 'scene:', scene);
+                // Register the scene BEFORE the async C++ call so handleCppEditResult
+                // finds the correct scene even if another drop comes in on a different track.
+                this.pendingWaveformScenes[track] = scene;
                 AudioBridge.send('cppLoadForEditing', {
                     trackIndex: track,
                     filePath: actualPath
                 });
-
-                // Request waveform data (includes peaks, duration, transients)
-                setTimeout(() => {
-                    this.requestWaveformFromCpp(track);
-                }, 100);
+                // Waveform is requested by handleCppEditResult once C++ confirms the load.
+                // Do NOT request it here — that would create a duplicate request whose response
+                // deletes pendingWaveformScenes[track] before the real callback fires.
             }
 
             this.render();
@@ -2526,7 +2618,7 @@ function handleCppEditResult(command, trackIndex, success, updatedFilePath) {
         }
 
         // Request updated waveform from C++
-        SampleEditor.requestWaveformFromCpp(trackIndex);
+        SampleEditor.requestWaveformFromCpp(trackIndex, SampleEditor.pendingWaveformScenes[trackIndex]);
     } else {
         console.error('[handleCppEditResult] Operation failed:', command);
     }
@@ -2535,6 +2627,10 @@ function handleCppEditResult(command, trackIndex, success, updatedFilePath) {
 // Global callback function for C++ BPM detection result
 function handleCppBPMResult(trackIndex, bpm) {
     console.log('[handleCppBPMResult] Track:', trackIndex, 'BPM:', bpm);
+
+    // Restore the detect button label
+    const btn = document.getElementById('sampleDetectBpmBtn');
+    if (btn) btn.innerHTML = '<span style="font-size:11px;font-weight:600;letter-spacing:0.5px;">BPM</span>';
 
     // Update the track sample's detected BPM
     const trackSample = SampleEditor.getTrackSample(trackIndex);
@@ -2547,6 +2643,9 @@ function handleCppBPMResult(trackIndex, bpm) {
     if (bpmInput && bpm > 0) {
         bpmInput.value = bpm;
     }
+
+    // Show the BPM result modal (triggered by the detect button)
+    SampleEditor.showBpmResultModal(bpm);
 }
 
 // Global callback function for C++ transient detection result
@@ -2582,7 +2681,17 @@ function handleCppWaveformResult(trackIndex, peaks, duration, transients) {
                     'Duration:', duration,
                     'Transients:', transients ? transients.length : 0);
 
-        const trackSample = SampleEditor.getTrackSample(trackIndex);
+        // If a specific scene was registered for this track's waveform request (e.g. song screen drop),
+        // use that slot; otherwise fall back to the current scene.
+        const pendingScene = SampleEditor.pendingWaveformScenes[trackIndex];
+        let trackSample;
+        if (pendingScene !== undefined) {
+            trackSample = SampleEditor.getClipSample(pendingScene, trackIndex);
+            delete SampleEditor.pendingWaveformScenes[trackIndex];
+        } else {
+            trackSample = SampleEditor.getTrackSample(trackIndex);
+        }
+
         if (trackSample) {
             const isNewSample = trackSample.duration === 0 && duration > 0;
             const isCurrentTrack = AppState.currentTrack === trackIndex;

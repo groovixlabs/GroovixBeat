@@ -1979,57 +1979,26 @@ const SongScreen = {
             return;
         }
 
-        const file = files[0];  // Only handle first file
+        const fileList = Array.from(files);
+        const midiExtensions = ['.mid', '.midi'];
+        const { row: startRow, col: trackIndex } = targetCell;
 
-        // Check if it's an audio file
-        const audioExtensions = ['.wav', '.mp3', '.ogg', '.flac', '.aiff', '.aif', '.m4a'];
-        const fileName = file.name.toLowerCase();
-        const isAudio = audioExtensions.some(ext => fileName.endsWith(ext));
+        // Audio files: OS paths are not available in JUCE WebView's DataTransfer.
+        // They are handled by window.handleNativeFileDrop (called from C++ filesDropped).
+        // MIDI files: content is accessible via FileReader so handle them here.
+        let sceneOffset = 0;
+        for (const file of fileList) {
+            const fileName = file.name.toLowerCase();
+            if (!midiExtensions.some(ext => fileName.endsWith(ext))) continue;
 
-        if (!isAudio) {
-            console.log('[SongScreen] Dropped file is not an audio file:', file.name);
-            return;
+            const sceneIndex = startRow + sceneOffset;
+            while (AppState.numScenes <= sceneIndex) AppState.addScene();
+            await this._importMidiPathToSlot_fromFile(file, sceneIndex, trackIndex);
+            sceneOffset++;
         }
 
-        const { row: sceneIndex, col: trackIndex } = targetCell;
-
-        // Set track type to 'sample' (track-level setting)
-        AppState.setTrackSettings(trackIndex, { trackType: 'sample' });
-
-        // Get the file path - for JUCE mode, we need the full path from dataTransfer
-        let filePath = null;
-
-        // In Electron/JUCE, files have a 'path' property
-        if (file.path) {
-            filePath = file.path;
-        } else {
-            // Fallback - try to get path from dataTransfer (for some browsers/environments)
-            const items = e.dataTransfer.items;
-            if (items && items.length > 0) {
-                const item = items[0];
-                if (item.getAsFile) {
-                    const f = item.getAsFile();
-                    if (f && f.path) {
-                        filePath = f.path;
-                    }
-                }
-            }
-        }
-
-        if (!filePath) {
-            console.warn('[SongScreen] Could not get file path from dropped file. File:', file.name);
-            // For web-only mode, we could potentially load via FileReader, but JUCE mode needs paths
-            alert('Drag and drop requires the full file path. This may not work in all browsers.');
-            return;
-        }
-
-        // Load the sample using SampleEditor - pass scene and track indices explicitly
-        if (typeof SampleEditor !== 'undefined' && typeof SampleEditor.loadSampleFromJuce === 'function') {
-            await SampleEditor.loadSampleFromJuce(filePath, sceneIndex, trackIndex);
-            console.log('[SongScreen] Sample loaded successfully for scene', sceneIndex, 'track', trackIndex);
-        } else {
-            console.warn('[SongScreen] SampleEditor not available for loading sample');
-        }
+        // Rebuild song screen if scenes were added
+        this.renderGrid();
 
         // Update the grid to show the sample indicator
         this.renderCanvas();
@@ -2066,5 +2035,56 @@ const SongScreen = {
         ctx.fillText('DROP', x + this.CELL_WIDTH / 2, y + this.CELL_HEIGHT / 2);
 
         ctx.restore();
+    },
+
+    // Import a MIDI File object (from web DataTransfer) into a specific clip slot.
+    _importMidiPathToSlot_fromFile: function(file, sceneIndex, trackIndex) {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                try { this._parseMidiBufferToSlot(ev.target.result, sceneIndex, trackIndex); }
+                catch (err) { console.warn('[SongScreen] MIDI parse error:', err); }
+                resolve();
+            };
+            reader.readAsArrayBuffer(file);
+        });
+    },
+
+    // Shared MIDI ArrayBuffer → clip slot parser.
+    _parseMidiBufferToSlot: function(arrayBuffer, sceneIndex, trackIndex) {
+        const parsed = MidiImporter.parseMidiFile(arrayBuffer);
+        if (!parsed) return;
+        const ticksPerStep = parsed.ticksPerBeat / 4;
+        const merged = [];
+        for (const track of parsed.tracks) {
+            for (const note of track.notes) {
+                merged.push({
+                    pitch: note.pitch,
+                    start: Math.round(note.startTicks / ticksPerStep),
+                    duration: Math.max(1, Math.round(note.durationTicks / ticksPerStep)),
+                    velocity: note.velocity
+                });
+            }
+        }
+        if (merged.length === 0) return;
+        let maxEnd = 0;
+        for (const n of merged) maxEnd = Math.max(maxEnd, n.start + n.duration);
+        const clipLength = Math.min(256, Math.ceil(maxEnd / 16) * 16) || 64;
+        AppState.clips[sceneIndex][trackIndex].notes = merged;
+        AppState.clips[sceneIndex][trackIndex].length = clipLength;
+        AppState.setTrackSettings(trackIndex, { trackType: 'melody' });
+    },
+
+    // Import a MIDI file from a native OS path into a specific clip slot.
+    // Fetches content via the JUCE resource provider then parses notes.
+    _importMidiPathToSlot: async function(filePath, sceneIndex, trackIndex) {
+        try {
+            const response = await fetch('/api/loadSample?path=' + encodeURIComponent(filePath));
+            if (!response.ok) throw new Error('fetch failed: ' + response.status);
+            const arrayBuffer = await response.arrayBuffer();
+            this._parseMidiBufferToSlot(arrayBuffer, sceneIndex, trackIndex);
+        } catch (err) {
+            console.error('[SongScreen] _importMidiPathToSlot error:', err);
+        }
     }
 };

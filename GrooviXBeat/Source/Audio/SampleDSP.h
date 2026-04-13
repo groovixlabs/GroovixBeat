@@ -116,17 +116,5 @@ public:
      */
     static float calculateRMS(const juce::AudioBuffer<float>& buffer);
 
-private:
-    // Helper for BPM detection - calculate adaptive threshold
-    static float calculateThreshold(const std::vector<float>& data);
-
-    // Helper for BPM detection - find peaks in envelope
-    static std::vector<int> findPeaks(const std::vector<float>& envelope,
-                                       float threshold,
-                                       int minPeakDistance);
-
-    // Helper for BPM detection - find most common interval
-    static int findMostCommonInterval(const std::vector<int>& peaks);
-
     SampleDSP() = delete;  // Static class, no instantiation
 };

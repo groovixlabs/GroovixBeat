@@ -47,9 +47,110 @@
 
 #if JUCE_WINDOWS
     #include <windows.h>
+    #include <oleidl.h>
+    #include <shlobj.h>
 #endif
 
 #define LOCAL_DEV_SERVER_ADDRESS "http://localhost:3033"
+
+//==============================================================================
+#if JUCE_WINDOWS
+/**
+ * Custom OLE IDropTarget that replaces WebView2's drop target on its child HWND.
+ * WebView2 registers its own IDropTarget which intercepts all OS file drops before
+ * JUCE's FileDragAndDropTarget gets a chance. By revoking WebView2's registration
+ * and registering this class instead, we can extract real OS file paths and forward
+ * them to JS via window.handleNativeFileDrop().
+ */
+class GroovixDropTarget final : public IDropTarget
+{
+public:
+    explicit GroovixDropTarget (SequencerComponent& owner) : owner (owner) {}
+
+    // IUnknown
+    ULONG __stdcall AddRef()  override { return InterlockedIncrement (&refCount); }
+    ULONG __stdcall Release() override
+    {
+        auto r = InterlockedDecrement (&refCount);
+        if (r == 0) delete this;
+        return r;
+    }
+    HRESULT __stdcall QueryInterface (REFIID riid, void** ppv) override
+    {
+        if (riid == IID_IUnknown || riid == IID_IDropTarget)
+            { *ppv = this; AddRef(); return S_OK; }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    // IDropTarget
+    HRESULT __stdcall DragEnter (IDataObject* obj, DWORD, POINTL, DWORD* effect) override
+    {
+        *effect = hasFiles (obj) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+    HRESULT __stdcall DragOver (DWORD, POINTL, DWORD* effect) override
+    {
+        *effect = DROPEFFECT_COPY;
+        return S_OK;
+    }
+    HRESULT __stdcall DragLeave() override { return S_OK; }
+
+    HRESULT __stdcall Drop (IDataObject* obj, DWORD, POINTL screenPt, DWORD* effect) override
+    {
+        auto files = extractFiles (obj);
+        if (files.isEmpty()) { *effect = DROPEFFECT_NONE; return S_OK; }
+        *effect = DROPEFFECT_COPY;
+
+        // Pass raw screen coordinates (physical pixels).
+        // JS converts them using window.screenX/Y and devicePixelRatio.
+        juce::String pathsJson = "[";
+        for (int i = 0; i < files.size(); ++i)
+        {
+            if (i > 0) pathsJson += ",";
+            juce::String escaped = files[i].replace ("\\", "\\\\").replace ("\"", "\\\"");
+            pathsJson += "\"" + escaped + "\"";
+        }
+        pathsJson += "]";
+
+        juce::String script = "window.handleNativeFileDrop(" + pathsJson + ","
+                            + juce::String (screenPt.x) + "," + juce::String (screenPt.y) + ")";
+        DBG ("GroovixDropTarget::Drop -> " + script);
+        owner.evaluateJavaScript (script);
+        return S_OK;
+    }
+
+private:
+    SequencerComponent& owner;
+    LONG refCount = 1;
+
+    static bool hasFiles (IDataObject* obj)
+    {
+        FORMATETC fmt = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        return obj->QueryGetData (&fmt) == S_OK;
+    }
+
+    static juce::StringArray extractFiles (IDataObject* obj)
+    {
+        juce::StringArray paths;
+        FORMATETC fmt = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        STGMEDIUM stg = {};
+        if (SUCCEEDED (obj->GetData (&fmt, &stg)))
+        {
+            auto* hDrop = static_cast<HDROP> (stg.hGlobal);
+            UINT count = DragQueryFileW (hDrop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < count; ++i)
+            {
+                WCHAR path[MAX_PATH] = {};
+                DragQueryFileW (hDrop, i, path, MAX_PATH);
+                paths.add (juce::String (path));
+            }
+            ReleaseStgMedium (&stg);
+        }
+        return paths;
+    }
+};
+#endif // JUCE_WINDOWS
 
 
 
@@ -526,6 +627,106 @@ bool SequencerComponent::CustomWebBrowser::pageAboutToLoad (const String& url)
     return true;
 }
 
+bool SequencerComponent::CustomWebBrowser::isInterestedInFileDrag (const StringArray& files)
+{
+    DBG("isInterestedInFileDrag called with " + juce::String(files.size()) + " files");
+    for (const auto& path : files)
+        DBG("  file: " + path);
+
+    for (const auto& path : files)
+    {
+        const auto ext = juce::File(path).getFileExtension().toLowerCase();
+        DBG("  ext: " + ext);
+        if (ext == ".wav" || ext == ".mp3" || ext == ".ogg" || ext == ".flac" ||
+            ext == ".aiff" || ext == ".aif" || ext == ".m4a" ||
+            ext == ".mid"  || ext == ".midi")
+        {
+            DBG("  -> interested");
+            return true;
+        }
+    }
+    DBG("  -> not interested");
+    return false;
+}
+
+void SequencerComponent::CustomWebBrowser::filesDropped (const StringArray& files, int x, int y)
+{
+    DBG("filesDropped called with " + juce::String(files.size()) + " files at " + juce::String(x) + "," + juce::String(y));
+    for (const auto& f : files)
+        DBG("  dropped: " + f);
+
+    // Build a JSON array of file paths and call JS handler
+    juce::String pathsJson = "[";
+    for (int i = 0; i < files.size(); ++i)
+    {
+        if (i > 0) pathsJson += ",";
+        juce::String escaped = files[i].replace("\\", "\\\\").replace("\"", "\\\"");
+        pathsJson += "\"" + escaped + "\"";
+    }
+    pathsJson += "]";
+
+    juce::String script = "window.handleNativeFileDrop(" + pathsJson + "," + juce::String(x) + "," + juce::String(y) + ")";
+    DBG("Calling JS: " + script);
+    parentComponent.evaluateJavaScript(script);
+}
+
+
+#if JUCE_WINDOWS
+void SequencerComponent::installNativeDragDrop()
+{
+    if (nativeDropTarget != nullptr) return; // already installed
+
+    auto* peer = getTopLevelComponent()->getPeer();
+    if (peer == nullptr) { DBG ("installNativeDragDrop: no peer yet"); return; }
+
+    auto* target = new GroovixDropTarget (*this);
+    nativeDropTarget = target;
+
+    auto mainHwnd = (HWND) peer->getNativeHandle();
+
+    // Walk every descendant HWND of the main window.
+    // WebView2 registers its own IDropTarget on its child HWND(s).
+    // We revoke those and register ours so we get the real OS file paths.
+    struct EnumState
+    {
+        GroovixDropTarget*  target;
+        juce::Array<void*>& hwnds;
+
+        static BOOL CALLBACK proc (HWND hwnd, LPARAM lp)
+        {
+            auto& s = *reinterpret_cast<EnumState*> (lp);
+            // RevokeDragDrop returns S_OK if a target was registered there
+            HRESULT rr = RevokeDragDrop (hwnd);
+            DBG ("  HWND " + juce::String::toHexString ((juce::pointer_sized_int)(void*)hwnd)
+                 + " RevokeDragDrop -> " + juce::String ((int)rr));
+            // Try to register on every child (RegisterDragDrop fails gracefully on non-OLE windows)
+            HRESULT hr = RegisterDragDrop (hwnd, s.target);
+            DBG ("  HWND " + juce::String::toHexString ((juce::pointer_sized_int)(void*)hwnd)
+                 + " RegisterDragDrop -> " + juce::String ((int)hr));
+            if (SUCCEEDED (hr))
+                s.hwnds.add ((void*) hwnd);
+            return TRUE;
+        }
+    };
+
+    EnumState state { target, nativeDropHwnds };
+    EnumChildWindows (mainHwnd, EnumState::proc, (LPARAM) &state);
+    DBG ("installNativeDragDrop: registered on " + juce::String (nativeDropHwnds.size()) + " HWNDs");
+}
+
+void SequencerComponent::uninstallNativeDragDrop()
+{
+    for (auto* hwnd : nativeDropHwnds)
+        RevokeDragDrop ((HWND) hwnd);
+    nativeDropHwnds.clear();
+
+    if (nativeDropTarget != nullptr)
+    {
+        nativeDropTarget->Release();
+        nativeDropTarget = nullptr;
+    }
+}
+#endif // JUCE_WINDOWS
 
 void SequencerComponent::onPageLoaded()
 {
@@ -600,6 +801,10 @@ void SequencerComponent::onPageLoaded()
     evaluateJavaScript(bridgeScript);
 
     loadSequencerState();
+
+#if JUCE_WINDOWS
+    installNativeDragDrop();
+#endif
 }
 
 void SequencerComponent::pingSequencer()
@@ -1316,6 +1521,10 @@ SequencerComponent::~SequencerComponent()
         }
         midiInputRoutes.clear();
     }
+
+#if JUCE_WINDOWS
+    uninstallNativeDragDrop();
+#endif
 
     webBrowser = nullptr;
 

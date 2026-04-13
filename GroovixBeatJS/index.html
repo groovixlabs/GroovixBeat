@@ -408,6 +408,12 @@
                 </div>
             </div>
 
+            <!-- Drag-and-drop overlay (MIDI or audio file) -->
+            <div id="midiDropZone" style="display:none;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <span>Drop MIDI or audio file</span>
+            </div>
+
             <div class="piano-roll-container" id="pianoRollContainer">
                 <div class="piano-roll-scroll" id="pianoRollScroll">
                     <div class="piano-keys">
@@ -478,6 +484,10 @@
                 <button class="sample-tool-btn" id="sampleZoomFitBtn" title="Zoom to Fit">
                     <span class="icon icon-zoom-fit"></span>
                 </button>
+                <div class="sample-toolbar-separator"></div>
+                <button class="sample-tool-btn" id="sampleDetectBpmBtn" title="Detect BPM">
+                    <span style="font-size:11px;font-weight:600;letter-spacing:0.5px;">BPM</span>
+                </button>
                 <div class="sample-file-info">
                     <span id="sampleFileName">No file loaded</span>
                 </div>
@@ -524,6 +534,30 @@
                         <canvas id="automationBarsCanvas"></canvas>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- BPM Detection Result Modal -->
+    <div class="warp-modal-overlay" id="bpmResultModal" style="display: none;">
+        <div class="warp-modal" style="min-width:280px;">
+            <div class="warp-modal-header">
+                <span class="warp-modal-title">Detected BPM</span>
+            </div>
+            <div class="warp-modal-body">
+                <div style="text-align:center;margin:12px 0 20px;">
+                    <span id="bpmResultValue" style="font-size:48px;font-weight:700;color:#d5a865;letter-spacing:2px;">--</span>
+                    <span style="font-size:16px;color:#888;margin-left:6px;">BPM</span>
+                </div>
+                <div class="warp-modal-row">
+                    <label>Project tempo:</label>
+                    <span class="warp-project-bpm" id="bpmResultProjectTempo">120</span>
+                </div>
+            </div>
+            <div class="warp-modal-footer" style="display:flex;gap:10px;justify-content:flex-end;">
+                <button class="track-settings-btn" id="bpmResultStretchBtn" title="Time-stretch sample to match project BPM">Stretch to Project BPM</button>
+                <button class="track-settings-btn" id="bpmResultUseBtn" title="Set project tempo to detected BPM" style="display: none;">Use as Project BPM</button>
+                <button class="track-settings-btn" id="bpmResultCloseBtn">Close</button>
             </div>
         </div>
     </div>

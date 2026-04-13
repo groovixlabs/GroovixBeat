@@ -37,6 +37,11 @@
 #include <JuceHeader.h>
 #include <set>
 
+#if JUCE_WINDOWS
+class GroovixDropTarget;
+#endif
+
+
 class GraphDocumentComponent;
 #include "../Sequencer/MidiBridge.h"
 #include "../Sequencer/SamplePlayerManager.h"
@@ -119,7 +124,8 @@ public:
 private:
 
 
-    class CustomWebBrowser : public WebBrowserComponent
+    class CustomWebBrowser : public WebBrowserComponent,
+                             public FileDragAndDropTarget
     {
     public:
         CustomWebBrowser (SequencerComponent& parent);
@@ -128,6 +134,10 @@ private:
 
         using Resource = juce::WebBrowserComponent::Resource;
         std::optional<Resource> getResource(const juce::String& url) const;
+
+        // FileDragAndDropTarget — intercept OS file drops and pass paths to JS
+        bool isInterestedInFileDrag (const StringArray& files) override;
+        void filesDropped (const StringArray& files, int x, int y) override;
 
     private:
         SequencerComponent& parentComponent;
@@ -283,6 +293,14 @@ private:
      *  Black keys are snapped to the nearest C Major note before mapping.
      *  Returns the original pitch if mapping is disabled or no scale is set. */
     static int remapCMajorPitch(int pitch, const TrackMidiMapping& mapping);
+
+#if JUCE_WINDOWS
+    friend class GroovixDropTarget;
+    void installNativeDragDrop();
+    void uninstallNativeDragDrop();
+    juce::Array<void*> nativeDropHwnds;
+    GroovixDropTarget* nativeDropTarget = nullptr;
+#endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SequencerComponent)
 };

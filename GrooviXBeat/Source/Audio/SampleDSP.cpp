@@ -5,7 +5,6 @@
 #include "SampleDSP.h"
 #include <algorithm>
 #include <cmath>
-#include <map>
 #include <vector>
 
 //==============================================================================
@@ -18,33 +17,126 @@ void SampleDSP::timeStretch(const juce::AudioBuffer<float>& source,
     if (source.getNumSamples() == 0 || ratio <= 0.0)
         return;
 
-    int numChannels = source.getNumChannels();
-    int oldLength = source.getNumSamples();
-    int newLength = static_cast<int>(std::round(oldLength * ratio));
+    const int numChannels = source.getNumChannels();
+    const int srcLen      = source.getNumSamples();
+    const int dstLen      = static_cast<int>(std::round(srcLen * ratio));
 
-    if (newLength <= 0)
-        return;
+    if (dstLen <= 0) return;
 
-    dest.setSize(numChannels, newLength);
+    dest.setSize(numChannels, dstLen);
+    dest.clear();
 
-    // Linear interpolation time stretching
+    // -----------------------------------------------------------------------
+    // WSOLA — Waveform Similarity Overlap-Add (pitch-preserving time stretch)
+    //
+    // The old linear-interpolation approach was simple resampling, which
+    // changes pitch proportionally to tempo (tape-speed effect).  WSOLA
+    // avoids this by:
+    //   1. Stepping through the SOURCE at the *original* sample rate (so
+    //      each frame is taken verbatim — no pitch shift).
+    //   2. Placing those frames in the OUTPUT at a *different* rate
+    //      (synthesisHop = analysisHop * ratio).
+    //   3. Before placing each frame, cross-correlating the candidate frame
+    //      against the tail of what's already been written, and shifting by
+    //      ±searchRadius to find the position that minimises the discontinuity
+    //      (waveform similarity step that gives WSOLA its name).
+    //   4. Overlap-adding with a Hann window and normalising.
+    // -----------------------------------------------------------------------
+
+    // Parameters — 2048-sample (~46 ms at 44.1 kHz) frame with 50 % overlap
+    const int frameSize    = 2048;
+    const int halfFrame    = frameSize / 2;
+    const int synthesisHop = halfFrame;          // fixed output step
+    const int searchRadius = 128;                // ±samples to search
+    const int corrLen      = 256;                // samples used for cross-corr
+
+    // Hann window
+    std::vector<float> hann(frameSize);
+    const double twoPiOverNm1 = 2.0 * juce::MathConstants<double>::pi / (frameSize - 1);
+    for (int i = 0; i < frameSize; ++i)
+        hann[i] = static_cast<float>(0.5 * (1.0 - std::cos(twoPiOverNm1 * i)));
+
+    // Use ch0 to determine the optimal frame positions via cross-correlation;
+    // the same positions are then applied to all channels so stereo imaging
+    // is preserved (L and R are never shifted relative to each other).
+    const float* ch0src = source.getReadPointer(0);
+
+    const int bufLen = dstLen + frameSize;   // headroom to avoid per-sample bounds checks
+    std::vector<float> ch0acc(bufLen, 0.0f); // accumulated ch0 output for cross-correlation
+    std::vector<float> normAcc(bufLen, 0.0f);
+    std::vector<int>   frameStarts;
+
+    for (int synthPos = 0; synthPos < dstLen; synthPos += synthesisHop)
+    {
+        // Nominal frame start in source for this synthesis position.
+        // Using round(synthPos/ratio) directly as frameStart means the analysis
+        // hop equals synthesisHop/ratio, which is correct for any ratio.
+        // (The earlier nomSrc-halfFrame formula was off by halfFrame, causing
+        // consecutive frames to overlap incorrectly in the identity case.)
+        const int nomFrameStart = static_cast<int>(std::round(synthPos / ratio));
+
+        // WSOLA: cross-correlate the recent output tail against candidate frames
+        // near nomFrameStart to find the shift that yields the smoothest join
+        int bestDelta = 0;
+        if (synthPos >= corrLen)
+        {
+            double bestCorr  = -1e30;
+            const int tailStart = synthPos - corrLen;
+
+            for (int delta = -searchRadius; delta <= searchRadius; ++delta)
+            {
+                const int candStart = nomFrameStart + delta;
+                if (candStart < 0 || candStart + corrLen > srcLen)
+                    continue;
+
+                double corr = 0.0;
+                for (int i = 0; i < corrLen; ++i)
+                    corr += ch0acc[tailStart + i] * ch0src[candStart + i];
+
+                if (corr > bestCorr)
+                {
+                    bestCorr  = corr;
+                    bestDelta = delta;
+                }
+            }
+        }
+
+        int frameStart = nomFrameStart + bestDelta;
+        frameStart = juce::jmax(0, juce::jmin(frameStart, srcLen - frameSize));
+        frameStarts.push_back(frameStart);
+
+        // Accumulate into ch0 buffer so the next frame can correlate against it.
+        // normAcc accumulates hann[i] (not hann[i]²) so that dividing by it in
+        // the final step exactly cancels the windowing: output = Σ(src·w) / Σ(w).
+        // Using w² here would give output = src·w/w² = src/w → huge amplification
+        // near the window edges where w ≈ 0.
+        const int writeEnd = std::min(synthPos + frameSize, bufLen);
+        for (int i = 0; i < writeEnd - synthPos; ++i)
+        {
+            ch0acc [synthPos + i] += ch0src[frameStart + i] * hann[i];
+            normAcc[synthPos + i] += hann[i];   // NOT hann[i]*hann[i]
+        }
+    }
+
+    // Apply the computed frame positions to every channel
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        const float* srcData = source.getReadPointer(ch);
-        float* dstData = dest.getWritePointer(ch);
+        const float* src = source.getReadPointer(ch);
+        float* dst = dest.getWritePointer(ch);
 
-        for (int i = 0; i < newLength; ++i)
+        int synthPos = 0;
+        for (const int frameStart : frameStarts)
         {
-            double srcIndex = static_cast<double>(i) / ratio;
-            int idx0 = static_cast<int>(srcIndex);
-            int idx1 = juce::jmin(idx0 + 1, oldLength - 1);
-            double frac = srcIndex - static_cast<double>(idx0);
-
-            // Linear interpolation between adjacent samples
-            dstData[i] = static_cast<float>(
-                srcData[idx0] * (1.0 - frac) + srcData[idx1] * frac
-            );
+            const int writeEnd = std::min(synthPos + frameSize, dstLen);
+            for (int i = 0; i < writeEnd - synthPos; ++i)
+                dst[synthPos + i] += src[frameStart + i] * hann[i];
+            synthPos += synthesisHop;
         }
+
+        // Normalise: dividing by Σhann cancels the window, giving unity gain
+        for (int i = 0; i < dstLen; ++i)
+            if (normAcc[i] > 1e-6f)
+                dst[i] /= normAcc[i];
     }
 }
 
@@ -56,142 +148,113 @@ double SampleDSP::detectBPM(const juce::AudioBuffer<float>& buffer, double sampl
     if (buffer.getNumSamples() == 0 || sampleRate <= 0.0)
         return 0.0;
 
-    // Use first channel for analysis
-    const float* channelData = buffer.getReadPointer(0);
-    int numSamples = buffer.getNumSamples();
+    const int numChannels = buffer.getNumChannels();
+    const int numSamples  = buffer.getNumSamples();
 
-    // Downsample by factor of 4 for faster processing
-    const int downsampleFactor = 4;
-    std::vector<float> downsampled;
-    downsampled.reserve(numSamples / downsampleFactor + 1);
+    // --- 1. Compute RMS energy in overlapping frames ---
+    // frameSize ~23 ms gives stable energy estimates.
+    // hopSize must give fps > BPM²/60 ≈ 540 so that integer lag quantisation
+    // error stays below 0.5 BPM across the full 60-180 range, making rounding
+    // always land on the correct integer.  fps ≈ 700 → max error 0.23 BPM.
+    const int frameSize = static_cast<int>(sampleRate * 0.023);
+    const int hopSize   = std::max(1, static_cast<int>(sampleRate / 700.0));
 
-    for (int i = 0; i < numSamples; i += downsampleFactor)
+    std::vector<float> energy;
+    energy.reserve(numSamples / hopSize + 1);
+
+    for (int start = 0; start + frameSize <= numSamples; start += hopSize)
     {
-        float sum = 0.0f;
-        int count = 0;
-        for (int j = 0; j < downsampleFactor && (i + j) < numSamples; ++j)
+        double rms = 0.0;
+        for (int ch = 0; ch < numChannels; ++ch)
         {
-            sum += std::abs(channelData[i + j]);
-            ++count;
+            const float* data = buffer.getReadPointer(ch);
+            for (int i = 0; i < frameSize; ++i)
+                rms += static_cast<double>(data[start + i]) * data[start + i];
         }
-        downsampled.push_back(sum / static_cast<float>(count));
+        energy.push_back(static_cast<float>(std::sqrt(rms / (frameSize * numChannels))));
     }
 
-    double downsampledRate = sampleRate / static_cast<double>(downsampleFactor);
-
-    // Calculate threshold for peak detection
-    float threshold = calculateThreshold(downsampled);
-
-    // Minimum distance between peaks (100ms = 600 BPM max)
-    int minPeakDistance = static_cast<int>(downsampledRate * 0.1);
-
-    // Find peaks (onset detection)
-    std::vector<int> peaks = findPeaks(downsampled, threshold, minPeakDistance);
-
-    if (peaks.size() < 2)
-    {
-        // Fallback: estimate from duration assuming 4 bars
-        double duration = static_cast<double>(numSamples) / sampleRate;
-        const int assumedBars = 4;
-        const int beatsPerBar = 4;
-        return std::round((assumedBars * beatsPerBar * 60.0) / duration);
-    }
-
-    // Find most common interval between peaks
-    int mostCommonInterval = findMostCommonInterval(peaks);
-
-    if (mostCommonInterval <= 0)
+    if (energy.size() < 8)
         return 0.0;
 
-    // Convert interval to BPM
-    double secondsPerBeat = static_cast<double>(mostCommonInterval) / downsampledRate;
-    double bpm = 60.0 / secondsPerBeat;
+    // --- 2. Onset strength: half-wave rectified first difference in dB ---
+    std::vector<float> onset;
+    onset.reserve(energy.size());
+    onset.push_back(0.0f);
 
-    // Normalize to reasonable BPM range (60-180)
-    while (bpm < 60.0) bpm *= 2.0;
+    for (size_t i = 1; i < energy.size(); ++i)
+    {
+        float prev = std::max(energy[i - 1], 1e-6f);
+        float curr = std::max(energy[i],     1e-6f);
+        float db   = 20.0f * std::log10(curr / prev);
+        onset.push_back(std::max(0.0f, db));   // half-wave rectify
+    }
+
+    // --- 3. Autocorrelation of onset envelope in the 60–180 BPM lag range ---
+    const double framesPerSecond = sampleRate / static_cast<double>(hopSize);
+
+    // Lags corresponding to 60 BPM (long) and 180 BPM (short)
+    const int maxLag = std::min(static_cast<int>(framesPerSecond * 60.0 / 60.0),
+                                static_cast<int>(onset.size()) - 1);
+    const int minLag = static_cast<int>(framesPerSecond * 60.0 / 180.0);
+
+    if (minLag >= maxLag)
+        return 0.0;
+
+    double bestCorr = -1.0;
+    int    bestLag  = minLag;
+    const int N     = static_cast<int>(onset.size());
+
+    for (int lag = minLag; lag <= maxLag; ++lag)
+    {
+        double corr = 0.0;
+        int    cnt  = 0;
+        for (int i = 0; i + lag < N; ++i)
+        {
+            corr += onset[i] * onset[i + lag];
+            ++cnt;
+        }
+        if (cnt > 0) corr /= cnt;
+
+        if (corr > bestCorr)
+        {
+            bestCorr = corr;
+            bestLag  = lag;
+        }
+    }
+
+    if (bestCorr <= 0.0)
+        return 0.0;
+
+    // --- 4. Parabolic interpolation to find the true sub-frame lag ---
+    // The autocorrelation operates on integer lags, but the true beat period
+    // rarely falls exactly on one. Fitting a parabola through the three samples
+    // around the peak gives a fractional correction that eliminates the
+    // systematic ~0.7 BPM offset caused by discrete quantisation.
+    double trueLag = static_cast<double>(bestLag);
+    if (bestLag > minLag && bestLag < maxLag)
+    {
+        // Recompute neighbours (already computed in the loop above; recalc is cheap)
+        auto corrAt = [&](int lag) -> double {
+            double c = 0.0; int cnt = 0;
+            for (int i = 0; i + lag < N; ++i) { c += onset[i] * onset[i + lag]; ++cnt; }
+            return cnt > 0 ? c / cnt : 0.0;
+        };
+        double y0 = corrAt(bestLag - 1);
+        double y1 = bestCorr;
+        double y2 = corrAt(bestLag + 1);
+        double denom = y0 - 2.0 * y1 + y2;
+        if (std::abs(denom) > 1e-10)
+            trueLag += 0.5 * (y0 - y2) / denom;
+    }
+
+    // --- 5. Convert fractional lag to BPM and normalise to 60–180 ---
+    double bpm = 60.0 * framesPerSecond / trueLag;
+
+    while (bpm < 60.0)  bpm *= 2.0;
     while (bpm > 180.0) bpm /= 2.0;
 
-    return std::round(bpm);
-}
-
-float SampleDSP::calculateThreshold(const std::vector<float>& data)
-{
-    if (data.empty())
-        return 0.0f;
-
-    // Calculate mean
-    double sum = 0.0;
-    for (float sample : data)
-    {
-        sum += sample;
-    }
-    float mean = static_cast<float>(sum / static_cast<double>(data.size()));
-
-    // Threshold is 1.5x the mean (same as JS implementation)
-    return mean * 1.5f;
-}
-
-std::vector<int> SampleDSP::findPeaks(const std::vector<float>& envelope,
-                                       float threshold,
-                                       int minPeakDistance)
-{
-    std::vector<int> peaks;
-    int lastPeakIndex = -minPeakDistance;
-
-    for (int i = 1; i < static_cast<int>(envelope.size()) - 1; ++i)
-    {
-        // Check if this is a peak (local maximum above threshold)
-        if (envelope[i] > threshold &&
-            envelope[i] > envelope[i - 1] &&
-            envelope[i] > envelope[i + 1] &&
-            (i - lastPeakIndex) >= minPeakDistance)
-        {
-            peaks.push_back(i);
-            lastPeakIndex = i;
-        }
-    }
-
-    return peaks;
-}
-
-int SampleDSP::findMostCommonInterval(const std::vector<int>& peaks)
-{
-    if (peaks.size() < 2)
-        return 0;
-
-    // Calculate intervals between consecutive peaks
-    std::vector<int> intervals;
-    intervals.reserve(peaks.size() - 1);
-
-    for (size_t i = 1; i < peaks.size(); ++i)
-    {
-        intervals.push_back(peaks[i] - peaks[i - 1]);
-    }
-
-    // Group similar intervals (within 5%) and count occurrences
-    std::map<int, int> intervalCounts;
-
-    for (int interval : intervals)
-    {
-        // Round to nearest 10 for grouping
-        int rounded = (interval / 10) * 10;
-        intervalCounts[rounded]++;
-    }
-
-    // Find most common interval
-    int mostCommonInterval = intervals[0];
-    int maxCount = 0;
-
-    for (const auto& pair : intervalCounts)
-    {
-        if (pair.second > maxCount)
-        {
-            maxCount = pair.second;
-            mostCommonInterval = pair.first;
-        }
-    }
-
-    return mostCommonInterval;
+    return std::round(bpm);   // BPM is always an integer in practice
 }
 
 //==============================================================================

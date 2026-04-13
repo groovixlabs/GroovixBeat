@@ -2497,6 +2497,128 @@ const ClipEditor = {
         }
     },
 
+    // Wire MIDI file drag-and-drop onto the clip editor panel
+    initDragDrop: function() {
+        const editor = document.querySelector('.clip-editor');
+        if (!editor) return;
+
+        let dragCounter = 0;
+
+        editor.addEventListener('dragenter', (e) => {
+            if (!e.dataTransfer.types.includes('Files')) return;
+            e.preventDefault();
+            dragCounter++;
+            editor.classList.add('drag-over');
+        });
+
+        editor.addEventListener('dragover', (e) => {
+            if (!e.dataTransfer.types.includes('Files')) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+        });
+
+        editor.addEventListener('dragleave', (e) => {
+            dragCounter--;
+            if (dragCounter === 0) editor.classList.remove('drag-over');
+        });
+
+        editor.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragCounter = 0;
+            editor.classList.remove('drag-over');
+
+            const files = Array.from(e.dataTransfer.files);
+
+            // Native file drop is handled by window.handleNativeFileDrop (called from C++).
+            // The DataTransfer.files here won't have OS paths in JUCE WebView, so we only
+            // handle MIDI parsing (which reads file content, not path) from this event.
+
+            // MIDI: content is accessible via FileReader so handle it here.
+            // Audio: path comes from C++ via handleNativeFileDrop — nothing to do here.
+            const midiFile = files.find(f => /\.midi?$/i.test(f.name));
+            if (midiFile) this.importMidiFile(midiFile);
+        });
+    },
+
+    // Import a MIDI File object into the current track (merged)
+    importMidiFile: function(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const parsed = MidiImporter.parseMidiFile(e.target.result);
+                const ticksPerStep = parsed.ticksPerBeat / 4; // 1 step = 1/16th note
+                const allNotes = [];
+
+                for (const track of parsed.tracks) {
+                    for (const note of track.notes) {
+                        allNotes.push({
+                            pitch:    note.pitch,
+                            start:    Math.round(note.startTicks / ticksPerStep),
+                            duration: Math.max(1, Math.round(note.durationTicks / ticksPerStep)),
+                            velocity: note.velocity
+                        });
+                    }
+                }
+
+                if (allNotes.length === 0) {
+                    alert('No notes found in MIDI file.');
+                    return;
+                }
+
+                let maxEnd = 0;
+                for (const n of allNotes) maxEnd = Math.max(maxEnd, n.start + n.duration);
+                const clipLength = Math.min(256, Math.ceil(maxEnd / 16) * 16) || 64;
+
+                const scene = AppState.currentScene;
+                const track = AppState.currentTrack;
+                const clip  = AppState.clips[scene][track];
+                clip.notes  = allNotes;
+                clip.length = clipLength;
+                AppState.currentLength = clipLength;
+
+                // Ensure track type is MIDI-capable
+                const settings = AppState.getTrackSettings(track);
+                if (settings.trackType === 'sample') {
+                    settings.trackType = 'melody';
+                }
+
+                // Refresh editor UI (mirrors the open() call sequence)
+                document.getElementById('lengthSelect').value = clipLength;
+                this.updateLengthDisplay();
+                this.updateModeSelector();   // hides SampleEditor if track was sample type
+                this.updateScaleSelector();
+                this.initializeEditor();
+                this.renderTrackButtons();
+                this.renderPianoKeys();
+                this.renderPianoGrid();
+                if (typeof SongScreen !== 'undefined')
+                    SongScreen.updateClipVisual(scene, track);
+
+                console.log(`[ClipEditor] MIDI drop: imported ${allNotes.length} notes → track ${track + 1}, ${clipLength} steps`);
+            } catch (err) {
+                console.error('[ClipEditor] MIDI import error:', err);
+                alert('Could not import MIDI file: ' + err.message);
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    },
+
+    // Import a MIDI file from a native OS path (used by window.handleNativeFileDrop).
+    // Fetches content via the JUCE resource provider then reuses importMidiFile's parse logic.
+    importMidiPath: async function(filePath) {
+        try {
+            const response = await fetch('/api/loadSample?path=' + encodeURIComponent(filePath));
+            if (!response.ok) throw new Error('fetch failed: ' + response.status);
+            const arrayBuffer = await response.arrayBuffer();
+            // Wrap in a synthetic File-like object so importMidiFile can read it
+            const blob = new Blob([arrayBuffer]);
+            const syntheticFile = new File([blob], filePath.split(/[/\\]/).pop());
+            this.importMidiFile(syntheticFile);
+        } catch (err) {
+            console.error('[ClipEditor] importMidiPath error:', err);
+        }
+    },
+
     // Initialize event listeners
     init: function() {
         // Click outside to close (only in overlay mode)
@@ -2508,6 +2630,8 @@ const ClipEditor = {
                 }
             });
         }
+
+        this.initDragDrop();
 
         // Length select
         document.getElementById('lengthSelect').addEventListener('change', (e) => {

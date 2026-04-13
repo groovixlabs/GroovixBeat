@@ -306,6 +306,43 @@ h1 {
     display: flex;
 }
 
+/* MIDI drag-and-drop overlay */
+#midiDropZone {
+    position: absolute;
+    inset: 0;
+    background: rgba(18, 18, 18, 0.88);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    z-index: 10;
+    border: 2px dashed rgba(213, 168, 101, 0.6);
+    border-radius: 12px;
+    color: #d5a865;
+    pointer-events: none; /* drag events handled by parent */
+    backdrop-filter: blur(4px);
+}
+
+#midiDropZone svg {
+    width: 52px;
+    height: 52px;
+    opacity: 0.85;
+}
+
+#midiDropZone span {
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    opacity: 0.9;
+}
+
+.clip-editor.drag-over #midiDropZone {
+    display: flex !important;
+    border-color: #d5a865;
+    background: rgba(213, 168, 101, 0.08);
+}
+
 .clip-editor {
     /*
     background: #242424;
@@ -327,6 +364,7 @@ h1 {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    position: relative; /* for #midiDropZone absolute positioning */
 }
 
 

@@ -3137,3 +3137,66 @@ if (typeof window !== 'undefined') {
         return "Connecting...";
     };
 }
+
+// Called by C++ (SequencerComponent::CustomWebBrowser::filesDropped) with native OS file paths.
+// Routes each file to the correct handler based on which screen is active and the drop coordinates.
+window.handleNativeFileDrop = function(filePaths, screenX, screenY) {
+    // screenX/Y are Windows physical screen pixel coordinates.
+    // Convert to CSS viewport pixels: divide by devicePixelRatio, subtract WebView's screen position.
+    const dpr = window.devicePixelRatio || 1;
+    const x = screenX / dpr - window.screenX;
+    const y = screenY / dpr - window.screenY;
+    console.log('[NativeDrop] screen:', screenX, screenY, 'dpr:', dpr,
+                'winScreen:', window.screenX, window.screenY, '-> viewport:', x, y);
+
+    const audioExts = /\.(wav|mp3|ogg|flac|aiff?|m4a)$/i;
+    const midiExts  = /\.midi?$/i;
+
+    const currentTab = (typeof TabManager !== 'undefined') ? TabManager.currentTab : 'song';
+
+    // --- Clip editor: drop anywhere loads into current track ---
+    if (currentTab === 'editor') {
+        for (const filePath of filePaths) {
+            if (audioExts.test(filePath)) {
+                AppState.getTrackSettings(AppState.currentTrack).trackType = 'sample';
+                if (typeof ClipEditor !== 'undefined' && typeof ClipEditor.updateModeSelector === 'function')
+                    ClipEditor.updateModeSelector();
+                SampleEditor.loadSampleFromJuce(filePath);
+                break;
+            } else if (midiExts.test(filePath)) {
+                if (typeof ClipEditor !== 'undefined' && typeof ClipEditor.importMidiPath === 'function')
+                    ClipEditor.importMidiPath(filePath);
+                break;
+            }
+        }
+        return;
+    }
+
+    // --- Song screen: route by canvas hit-test ---
+    if (typeof SongScreen !== 'undefined' && SongScreen.canvas) {
+        const rect = SongScreen.canvas.getBoundingClientRect();
+        console.log('[NativeDrop] canvas rect:', rect.left, rect.top, rect.right, rect.bottom,
+                    '-> cell pos:', x - rect.left, y - rect.top);
+        const cell = SongScreen.getCellAtPosition(x - rect.left, y - rect.top);
+        console.log('[NativeDrop] hit cell:', cell);
+        if (cell) {
+            (async () => {
+                let sceneOffset = 0;
+                for (const filePath of filePaths) {
+                    const sceneIndex = cell.row + sceneOffset;
+                    const trackIndex = cell.col;
+                    while (AppState.numScenes <= sceneIndex) AppState.addScene();
+                    if (audioExts.test(filePath)) {
+                        AppState.setTrackSettings(trackIndex, { trackType: 'sample' });
+                        await SampleEditor.loadSampleFromJuce(filePath, sceneIndex, trackIndex);
+                    } else if (midiExts.test(filePath)) {
+                        await SongScreen._importMidiPathToSlot(filePath, sceneIndex, trackIndex);
+                    }
+                    sceneOffset++;
+                }
+                SongScreen.renderGrid();
+                SongScreen.renderCanvas();
+            })();
+        }
+    }
+};

@@ -1,3 +1,13 @@
+*************************************************************************************
+
+Please note this project is no longer under active development. The code here is
+just for reference and posterity.
+
+*************************************************************************************
+
+
+
+
 This is Source code for the GroovixBeat Groove box (BETA) . This was written in the JUCE framework with a lot of help from AI.
 
 It uses a similar workflow to Korg Gadget IPad App. You create clips with Samples, Midi + VSTs or Midi + Sampled Instruments and sequence them into scenes and songs. There is also a live perfromance mode to trigger clips. The UI is in HTML CSS and JS and the time critical tasks like Sequencing and audio processing is done in the JUCE backend.
